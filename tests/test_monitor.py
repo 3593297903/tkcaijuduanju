@@ -115,6 +115,57 @@ class MigrationTests(LocalCase):
         self.assertEqual(new_row["genre"], "待归纳")
         self.assertIsNone(new_row["image"])
 
+    def test_new_source_description_without_saved_old_source_invalidates_inherited_translation(self):
+        old = snap("2020-01-01T00:00:00Z", 100)
+        self.store.commit_batch([old], metadata=[("demo", ONE, old.captured_at, {
+            "source_title": "Synthetic One", "title_zh": "旧译标题", "description_zh": "甲", "genre": "旧题材",
+        })])
+        changed = snap("2020-01-02T00:00:00Z", 200)
+        self.store.commit_batch([changed], metadata=[("demo", ONE, changed.captured_at, {
+            "source_title": "Synthetic One", "description_en": "About B",
+        })])
+        row = build_report(self.store, self.config, "2020-01-02")["rows"][0]
+        self.assertEqual(row["title_zh"], "旧译标题")
+        self.assertEqual(row["description_zh"], "待翻译／待补充原始简介")
+        self.assertEqual(row["genre"], "待归纳")
+        self.assertEqual(row["metadata_status"], "pending")
+        old_row = build_report(self.store, self.config, "2020-01-01")["rows"][0]
+        self.assertEqual((old_row["description_zh"], old_row["genre"]), ("甲", "旧题材"))
+
+    def test_equal_known_source_preserves_translation_and_new_explicit_translation_is_used(self):
+        old = snap("2020-01-01T00:00:00Z", 100)
+        self.store.commit_batch([old], metadata=[("demo", ONE, old.captured_at, {
+            "source_title": "Synthetic One", "title_zh": "旧译标题", "description_en": "About A",
+            "description_zh": "甲", "genre": "旧题材",
+        })])
+        unchanged = snap("2020-01-02T00:00:00Z", 200)
+        self.store.commit_batch([unchanged], metadata=[("demo", ONE, unchanged.captured_at, {
+            "source_title": "Synthetic One", "description_en": "About A",
+        })])
+        row = build_report(self.store, self.config, "2020-01-02")["rows"][0]
+        self.assertEqual((row["title_zh"], row["description_zh"], row["genre"]), ("旧译标题", "甲", "旧题材"))
+        self.assertEqual(row["metadata_status"], "available")
+        translated = snap("2020-01-03T00:00:00Z", 300)
+        self.store.commit_batch([translated], metadata=[("demo", ONE, translated.captured_at, {
+            "description_en": "About B", "description_zh": "乙", "genre": "新题材",
+        })])
+        row = build_report(self.store, self.config, "2020-01-03")["rows"][0]
+        self.assertEqual((row["title_zh"], row["description_zh"], row["genre"]), ("旧译标题", "乙", "新题材"))
+        self.assertEqual(row["metadata_status"], "available")
+
+    def test_explicit_new_translation_wins_when_old_source_was_unknown(self):
+        old = snap("2020-01-01T00:00:00Z", 100)
+        self.store.commit_batch([old], metadata=[("demo", ONE, old.captured_at, {
+            "source_title": "Synthetic One", "title_zh": "旧译标题", "description_zh": "甲", "genre": "旧题材",
+        })])
+        updated = snap("2020-01-02T00:00:00Z", 200)
+        self.store.commit_batch([updated], metadata=[("demo", ONE, updated.captured_at, {
+            "description_en": "About B", "description_zh": "乙", "genre": "新题材",
+        })])
+        row = build_report(self.store, self.config, "2020-01-02")["rows"][0]
+        self.assertEqual((row["title_zh"], row["description_zh"], row["genre"]), ("旧译标题", "乙", "新题材"))
+        self.assertEqual(row["metadata_status"], "available")
+
     def test_rich_metadata_and_covers_copied_locally(self):
         source = self.fixture_history()
         cover = source / "thumbnails/demo/cover.png"
@@ -274,6 +325,38 @@ class HttpTests(LocalCase):
                 sequence = [self.response(more=True, cursor=cursor)]
             with self.assertRaisesRegex(MonitorError, "cursor"):
                 collect_http("demo", self.spec_path, self.transport(sequence))
+
+    def test_negative_and_signed_nonforward_numeric_cursors_fail_without_commit(self):
+        for initial, following in (("0", -1), ("0", "-1"), ("0", "+0"), ("0", " -0 "), ("2", "+1"), ("+2", "2"), ("opaque-A", "-1")):
+            with self.subTest(initial=initial, following=following):
+                self.spec["initial_cursor"] = initial
+                write_json(self.spec_path, self.spec)
+                sequence = [self.response(more=True, cursor=following), self.response(items=[{"dramaID": TWO, "dramaName": "Two", "numWatched": "9"}], cursor="2")]
+                with self.assertRaisesRegex(MonitorError, "cursor"):
+                    snapshot = collect_http("demo", self.spec_path, self.transport(sequence))
+                    self.store.commit_batch([snapshot])
+                self.assertEqual(self.store.status()["snapshots"], 0)
+
+    def test_forward_signed_numeric_and_opaque_cursors_remain_supported(self):
+        for following in ("+1", "opaque-A", "token-1"):
+            with self.subTest(following=following):
+                sequence = [self.response(more=True, cursor=following), self.response(items=[{"dramaID": TWO, "dramaName": "Two", "numWatched": "9"}], cursor="2")]
+                result = collect_http("demo", self.spec_path, self.transport(sequence))
+                self.assertEqual(len(result.records), 2)
+
+    def test_opaque_cursor_repetition_and_negative_terminal_cursor_fail(self):
+        second = {"dramaID": TWO, "dramaName": "Two", "numWatched": "9"}
+        sequence = [self.response(more=True, cursor="opaque-A"), self.response(items=[second], more=True, cursor="opaque-A")]
+        with self.assertRaisesRegex(MonitorError, "cursor"):
+            collect_http("demo", self.spec_path, self.transport(sequence))
+        with self.assertRaisesRegex(MonitorError, "negative"):
+            collect_http("demo", self.spec_path, self.transport([self.response(cursor="-1")]))
+        self.spec["initial_cursor"] = "-1"
+        write_json(self.spec_path, self.spec)
+        transport = self.transport([])
+        with self.assertRaisesRegex(MonitorError, "negative"):
+            collect_http("demo", self.spec_path, transport)
+        self.assertEqual(self.calls, [])
 
     def test_auth_fails_without_retry_and_private_values_are_not_in_errors(self):
         for status in (401, 403):

@@ -115,7 +115,11 @@ class Store:
             update = json.loads(row[0])
             if "source_title" in update and "source_title" in merged and update["source_title"] != merged["source_title"]:
                 merged.pop("title_zh", None)
-            if "description_en" in update and "description_en" in merged and update["description_en"] != merged["description_en"]:
+            # Retain inherited translations only when the saved source proves equality.
+            # Explicit translations in this update are applied after invalidation.
+            if "description_en" in update and (
+                not update["description_en"] or update["description_en"] != merged.get("description_en")
+            ):
                 merged.pop("description_zh", None)
                 merged.pop("genre", None)
             merged.update(update)

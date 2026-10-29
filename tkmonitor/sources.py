@@ -151,13 +151,25 @@ def _page(value, fields=None):
     cursor = _field(value, fields.get("cursor", "cursor"))
     if not isinstance(cursor, (str, int)) or isinstance(cursor, bool):
         raise MonitorError("Pagination cursor must be a string or integer.")
+    _numeric_cursor(str(cursor))
     return items, has_more, str(cursor)
 
 
+def _numeric_cursor(value):
+    """Signed integer strings remain numeric; genuine opaque tokens stay opaque."""
+    if not re.fullmatch(r"[+-]?[0-9]+", value.strip()):
+        return None
+    number = int(value)
+    if number < 0:
+        raise MonitorError("Pagination cursor cannot be a negative number; no partial snapshot was committed.")
+    return number
+
+
 def _advance(cursor, following, seen):
+    current_number, following_number = _numeric_cursor(cursor), _numeric_cursor(following)
     if following in seen or following == cursor:
         raise MonitorError("Pagination cursor did not advance; no partial snapshot was committed.")
-    if cursor.isdigit() and following.isdigit() and int(following) <= int(cursor):
+    if current_number is not None and following_number is not None and following_number <= current_number:
         raise MonitorError("Pagination cursor moved backward; no partial snapshot was committed.")
 
 
@@ -219,6 +231,7 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
     parts = urlsplit(url)
     query = parse_qsl(parts.query, keep_blank_values=True)
     cursor = str(spec.get("initial_cursor", next((v for k, v in query if k == cursor_param), "0")))
+    _numeric_cursor(cursor)
     records, identifiers, seen = [], set(), {cursor}
     started = clock()
     transport = transport or urllib_transport
