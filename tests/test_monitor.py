@@ -415,6 +415,66 @@ class HttpTests(LocalCase):
         result = collect_http("demo", self.spec_path, self.transport([self.response(body=body)]))
         self.assertEqual(result.records[0].frontend_integer, 5)
 
+    def drama_items(self, first, count):
+        return [{"dramaID": f"{index:019d}", "dramaName": "Synthetic " + str(index), "numWatched": "5"}
+                for index in range(first, first + count)]
+
+    def test_tiktok_drama_list_requires_zero_start_before_request(self):
+        for captured, override in (("20", None), ("0", "20"), ("0", "opaque-A")):
+            with self.subTest(captured=captured, override=override):
+                self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=" + captured
+                self.spec.pop("initial_cursor", None)
+                if override is not None:
+                    self.spec["initial_cursor"] = override
+                write_json(self.spec_path, self.spec)
+                transport = self.transport([self.response()])
+                with self.assertRaisesRegex(MonitorError, "start.*zero"):
+                    collect_http("demo", self.spec_path, transport)
+                self.assertEqual(self.calls, [])
+
+    def test_tiktok_drama_list_offsets_match_actual_page_counts(self):
+        self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+        write_json(self.spec_path, self.spec)
+        sequence = [self.response(items=self.drama_items(1, 20), more=True, cursor="20"),
+                    self.response(items=self.drama_items(21, 3), cursor="23")]
+        snapshot = collect_http("demo", self.spec_path, self.transport(sequence))
+        self.assertEqual(len(snapshot.records), 23)
+        self.assertIn("cursor=20", self.calls[1][0])
+
+    def test_tiktok_drama_list_cannot_override_its_actual_cursor_parameter(self):
+        self.spec.update(url="https://www.tiktok.com/api/drama/user/drama_list/?cursor=20", initial_cursor="0", cursor_param="page")
+        write_json(self.spec_path, self.spec)
+        transport = self.transport([])
+        with self.assertRaisesRegex(MonitorError, "actual cursor"):
+            collect_http("demo", self.spec_path, transport)
+        self.assertEqual(self.calls, [])
+
+    def test_tiktok_drama_list_skipped_overlapping_or_opaque_offsets_cannot_commit(self):
+        self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+        write_json(self.spec_path, self.spec)
+        for first, final in (("999", "23"), ("19", "23"), ("20", "24"), ("20", "22"), ("opaque-A", "23")):
+            with self.subTest(first=first, final=final):
+                sequence = [self.response(items=self.drama_items(1, 20), more=True, cursor=first),
+                            self.response(items=self.drama_items(21, 3), cursor=final)]
+                with self.assertRaisesRegex(MonitorError, "offset"):
+                    snapshot = collect_http("demo", self.spec_path, self.transport(sequence))
+                    self.store.commit_batch([snapshot])
+                self.assertEqual(self.store.status()["snapshots"], 0)
+
+    def test_cover_urls_and_theme_values_are_preserved_without_downloads(self):
+        zoom_url = "https://cdn.invalid/zoom-240.png?synthetic=1"
+        cover_url = "https://cdn.invalid/cover-240.png?synthetic=2"
+        fallback_url = "https://cdn.invalid/cover-list.png?synthetic=3"
+        for zoom, cover, expected in (({"240": zoom_url, "480": "unused"}, {"240": cover_url}, zoom_url),
+                                      ({"480": "unused"}, {"240": cover_url}, cover_url),
+                                      ({}, {"urlList": [fallback_url]}, fallback_url)):
+            with self.subTest(expected=expected):
+                item = {"dramaID": ONE, "dramaName": "Synthetic", "numWatched": "5", "zoomCover": zoom, "cover": cover,
+                        "themes": [{"tagID": "synthetic-id", "tagKey": "synthetic-key", "tagVal": "Family"}]}
+                snapshot = collect_http("demo", self.spec_path, self.transport([self.response(items=[item])]))
+                self.assertEqual(snapshot.records[0].metadata["thumbnail_url"], expected)
+                self.assertEqual(snapshot.records[0].metadata["platform_themes"], ["Family"])
+
 
 class CheckpointAndCliTests(LocalCase):
     def cli(self, *args):
@@ -484,6 +544,11 @@ class CheckpointAndCliTests(LocalCase):
         write_json(path, checkpoint)
         result = collect_checkpoint(path, "demo", "2020-01-01")
         self.assertEqual((result.records[0].display_views, result.records[0].frontend_integer), (1200, 1234))
+        checkpoint["run"]["pages"][0]["response"]["cursor"] = "999"
+        write_json(path, checkpoint)
+        with self.assertRaisesRegex(MonitorError, "offset"):
+            collect_checkpoint(path, "demo", "2020-01-01")
+        checkpoint["run"]["pages"][0]["response"]["cursor"] = "1"
         checkpoint["run"]["pages"][0]["response"]["hasMore"] = True
         write_json(path, checkpoint)
         with self.assertRaisesRegex(MonitorError, "incomplete"):

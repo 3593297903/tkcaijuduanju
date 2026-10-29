@@ -101,6 +101,19 @@ def _first(item, names):
     return None
 
 
+def _thumbnail_url(item, card=None):
+    zoom = item.get("zoomCover")
+    cover = item.get("cover")
+    candidates = [zoom.get("240") if isinstance(zoom, dict) else None,
+                  cover.get("240") if isinstance(cover, dict) else None,
+                  card.get("thumbnail_url") if card else None, item.get("thumbnail_url")]
+    if isinstance(cover, dict) and isinstance(cover.get("urlList"), list):
+        candidates.extend(cover["urlList"])
+    elif isinstance(cover, str):
+        candidates.append(cover)
+    return next((url for url in candidates if isinstance(url, str) and url), None)
+
+
 def _api_record(item, mapping=None, card=None):
     if not isinstance(item, dict):
         raise MonitorError("A drama response item is not an object.")
@@ -132,6 +145,9 @@ def _api_record(item, mapping=None, card=None):
         metadata["platform_themes"] = [theme.get("tagVal") for theme in item["themes"] if isinstance(theme, dict)]
     if isinstance(item.get("metadata"), dict):
         metadata.update(item["metadata"])
+    thumbnail = _thumbnail_url(item, card)
+    if thumbnail:
+        metadata["thumbnail_url"] = thumbnail
     return Record(drama_id, title, display, frontend, raw, metadata)
 
 
@@ -171,6 +187,13 @@ def _advance(cursor, following, seen):
         raise MonitorError("Pagination cursor did not advance; no partial snapshot was committed.")
     if current_number is not None and following_number is not None and following_number <= current_number:
         raise MonitorError("Pagination cursor moved backward; no partial snapshot was committed.")
+
+
+def _drama_offset(cursor, following, item_count):
+    """TikTok user/drama_list cursors are offsets, not arbitrary forward tokens."""
+    current_offset, following_offset = _numeric_cursor(cursor), _numeric_cursor(following)
+    if current_offset is None or following_offset is None or following_offset != current_offset + item_count:
+        raise MonitorError("TikTok drama_list pagination offset does not match its returned record count; no whole-account snapshot was committed.")
 
 
 def _retry_delay(headers, attempt, maximum):
@@ -229,9 +252,14 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
     if not isinstance(cursor_param, str) or not cursor_param:
         raise MonitorError("cursor_param must be a nonempty query parameter name.")
     parts = urlsplit(url)
+    drama_list = parts.path.rstrip("/") == "/api/drama/user/drama_list"
+    if drama_list and cursor_param != "cursor":
+        raise MonitorError("TikTok drama_list requires its actual cursor query parameter for whole-account collection.")
     query = parse_qsl(parts.query, keep_blank_values=True)
     cursor = str(spec.get("initial_cursor", next((v for k, v in query if k == cursor_param), "0")))
-    _numeric_cursor(cursor)
+    initial_offset = _numeric_cursor(cursor)
+    if drama_list and initial_offset != 0:
+        raise MonitorError("TikTok drama_list collection must start at numeric cursor zero to cover the whole account.")
     records, identifiers, seen = [], set(), {cursor}
     started = clock()
     transport = transport or urllib_transport
@@ -269,6 +297,8 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
         except (json.JSONDecodeError, UnicodeError) as exc:
             raise MonitorError("TikTok response is not valid JSON; check login or verification in the browser.") from exc
         items, has_more, following = _page(value, spec.get("fields"))
+        if drama_list:
+            _drama_offset(cursor, following, len(items))
         for item in items:
             record = _api_record(item, spec.get("record_fields"))
             if record.id in identifiers:
@@ -318,6 +348,7 @@ def collect_checkpoint(path, account, expected_day, not_before=None):
                 raise MonitorError("Browser page timestamps are out of order.")
             previous_observed = observed
             items, more, following = _page(page.get("response"))
+            _drama_offset(cursor, following, len(items))
             if more != (index < len(pages) - 1):
                 raise MonitorError("Browser checkpoint is incomplete or has pages after a terminal response.")
             records.extend(_api_record(item, card=card_map.get(item.get("dramaID"))) for item in items)
