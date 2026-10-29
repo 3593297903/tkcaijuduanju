@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>三账号逐剧监测：初始、昨天、今天</title>
+<style>
+:root{color-scheme:light}*{box-sizing:border-box}body{margin:24px;font:14px/1.65 Arial,"Microsoft YaHei",sans-serif;color:#203047;background:#f6f8fb}h1{font-size:24px;margin:0 0 12px}p{max-width:1250px;margin:8px 0}.note,small{color:#607086}.notice{border-left:3px solid #b77b26;padding:8px 12px;background:#fff8ec}.controls{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin:20px 0 14px}select,input,button{font:inherit;border:1px solid #b8c7d7;background:white;border-radius:5px;padding:7px 10px}input[type=checkbox]{padding:0}button{cursor:pointer;color:#355d89}.totals{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}.totals div{background:white;border:1px solid #e0e7ef;border-radius:6px;padding:12px 16px;min-width:180px}.totals b{display:block;font-size:20px}.wrap{overflow:auto;border:1px solid #dce4ed;border-radius:6px;max-height:76vh;background:white}table{width:100%;border-collapse:separate;border-spacing:0}th,td{padding:10px 12px;border-bottom:1px solid #e1e7ef;vertical-align:middle}th{position:sticky;top:0;background:#243449;color:white;z-index:2;white-space:nowrap;text-align:center}td{white-space:nowrap}tbody tr:nth-child(even){background:#f7fafc}td.num{text-align:right;font-variant-numeric:tabular-nums}.title{white-space:normal;min-width:340px;max-width:520px}.title b{display:block}.zh{color:#355d89}.cover{width:94px;height:94px;object-fit:cover;border-radius:4px}details{margin-top:5px}summary{cursor:pointer;color:#355d89}details p{white-space:normal;min-width:300px}.gain{color:#12644a}.loss{color:#a23030}.time{font-size:12px;color:#607086}footer{margin:18px 0}.empty{text-align:center;padding:36px;color:#607086}.status{font-weight:bold}.precision{max-width:1250px}
+</style>
+</head>
+<body>
+<h1>三账号逐剧监测：初始、昨天、今天</h1>
+<p id="asOf" class="note"></p>
+<p class="precision"><strong>播放量和增量均用完整数字显示，单位：次。</strong>主统计统一按页面显示值折算整数；历史缩写中未保存的低位无法恢复，折算值不代表平台精确计数。本次已取得的前端整数在表格末列单独列出。</p>
+<p class="note">初始＝该剧首次被记录的值，后续不重置；每天取北京时间当日最后一次实际快照。新增剧前一日留空，缺失数据不补0。所有增量和涨跌幅使用相应同批剧目计算。上次实际采集单独比较，跨日增量不冒充单日增长。</p>
+<div class="controls">
+<label>统计日 <input id="reportDate" type="date"></label>
+<label>账号 <select id="account"><option value="">全部账号</option><option value="epiccreation111">Epic Creation</option><option value="vervedramaeg">VerveDrama</option><option value="babydrama_ca">Baby Drama-ca</option></select></label>
+<label>搜索 <input id="query" placeholder="英文名、中文名、题材或简介"></label>
+<label>排序 <select id="sort"><option value="original">账号原顺序</option><option value="today">今天播放量降序</option><option value="delta">今天较昨天增加量降序</option><option value="rate">今天较昨天涨幅降序</option><option value="lastDelta">较上次增加量降序</option><option value="lastRate">较上次涨幅降序</option><option value="cumulative">今天较初始增加量降序</option></select></label>
+<label><input id="onlyObserved" type="checkbox" checked> 只显示统计日有记录的剧目</label>
+<button id="downloadCsv" type="button">导出当前清单CSV</button>
+</div>
+<p id="status" class="status"></p><p id="missingMessage" class="notice" hidden></p>
+<div class="totals">
+<div>初始播放量合计<b id="initialTotal">—</b><small>按各剧首次记录汇总</small></div>
+<div>昨天播放量合计<b id="yesterdayTotal">—</b><small id="yesterdayCount"></small></div>
+<div>今天播放量合计<b id="todayTotal">—</b><small id="todayCount"></small></div>
+<div>今天较昨天增加<b id="deltaTotal">—</b><small id="dayRate"></small></div>
+<div>较上次实际采集增加<b id="lastDeltaTotal">—</b><small id="lastRateTotal"></small></div><div>今天较初始增加<b id="cumulativeTotal">—</b><small id="cumulativeRate"></small></div>
+</div>
+<div class="wrap"><table><thead><tr>
+<th>账号</th><th>序号</th><th>页面小封面</th><th>英文名／中文名</th><th>初始播放量</th><th id="yesterdayHeader">昨天播放量</th><th id="todayHeader">今天播放量</th><th>今天较昨天增加</th><th>今天较昨天涨跌幅</th><th>昨天较初始增加</th><th>昨天较初始涨跌幅</th><th>今天较初始增加</th><th>今天较初始涨跌幅</th><th>首次记录时间</th><th>昨天记录时间</th><th>今天记录时间</th><th>本次已采前端整数</th><th>上次实际播放量</th><th>较上次增加</th><th>较上次涨幅</th><th>上次实际采集时间</th>
+</tr></thead><tbody id="rows"></tbody></table></div>
+<footer><small>记录时间均为北京时间，表示采集时间。简介、题材和关联预览视频日期沿用既有资料；预览视频日期不保证等于整剧上线日期。页面可离线使用。</small></footer>
+<script id="monitorData" type="application/json">__MONITOR_DATA__</script>
+<script>
+(()=>{
+'use strict';
+const data=JSON.parse(document.getElementById('monitorData').textContent),$=id=>document.getElementById(id);
+const number=n=>n===null||n===undefined?'—':n.toLocaleString('en-US'),signed=n=>n===null||n===undefined?'—':(n>0?'+':'')+number(n),percent=n=>n===null||n===undefined?'—':(n>0?'+':'')+(n*100).toFixed(2)+'%';
+const day=s=>new Date(Date.parse(s)+8*3600000).toISOString().slice(0,10),time=s=>s?new Date(Date.parse(s)+8*3600000).toISOString().replace('T',' ').slice(0,19):'—';
+const previousDay=s=>new Date(Date.parse(s+'T00:00:00Z')-86400000).toISOString().slice(0,10),difference=(a,b)=>a==null||b==null?null:b-a,rate=(a,b)=>a==null||b==null||a===0?null:(b-a)/a;
+const snapshots=data.history.snapshots.slice().sort((a,b)=>Date.parse(a.capturedAt)-Date.parse(b.capturedAt)),daily=new Map(),initial=new Map(data.initial.map(r=>[r.account+':'+r.id,r]));
+for(const s of snapshots)daily.set(s.account+':'+day(s.capturedAt),{...s,byId:new Map(s.records.map(r=>[r.id,r]))});
+const knownDays=[...new Set(snapshots.map(s=>day(s.capturedAt)))].sort();$('reportDate').min=knownDays[0];$('reportDate').max=knownDays.at(-1);$('reportDate').value=data.reportDay;
+let visible=[];
+function cell(tr,text,classes=''){const td=document.createElement('td');td.textContent=text;if(classes)td.className=classes;tr.append(td);return td;}
+function values(meta,selected){const first=initial.get(meta.account+':'+meta.id),hasFirst=first&&day(first.capturedAt)<=selected,a=daily.get(meta.account+':'+previousDay(selected)),b=daily.get(meta.account+':'+selected),before=a?.byId.get(meta.id)?.views??null,after=b?.byId.get(meta.id)?.views??null,base=hasFirst?first.views:null;
+const last=snapshots.filter(s=>s.account===meta.account&&day(s.capturedAt)<selected).at(-1),lastRecord=last?.records.find(r=>r.id===meta.id),lastValue=lastRecord?.views??null;return{...meta,lastViews:lastValue,lastDelta:difference(lastValue,after),lastRate:rate(lastValue,after),lastAt:lastRecord?last.capturedAt:null,initial:base,yesterday:before,today:after,delta:difference(before,after),rate:rate(before,after),previousCumulative:difference(base,before),previousCumulativeRate:rate(base,before),cumulative:difference(base,after),cumulativeRate:rate(base,after),firstAt:hasFirst?first.capturedAt:null,yesterdayAt:before===null?null:a.capturedAt,todayAt:after===null?null:b.capturedAt,frontend:selected===data.reportDay?meta.today_frontend_integer:null};}
+function sumKnown(rows,key){const known=rows.filter(r=>r[key]!==null&&r[key]!==undefined);return known.length?known.reduce((s,r)=>s+r[key],0):null;}
+function draw(){const selected=$('reportDate').value,prior=previousDay(selected),query=$('query').value.trim().toLowerCase();
+visible=data.rows.map((r,i)=>({...values(r,selected),original:i})).filter(r=>(!$('account').value||r.account===$('account').value)&&(!$('onlyObserved').checked||r.today!==null)&&[r.title,r.title_zh,r.genre,r.description_zh].join(' ').toLowerCase().includes(query));
+const key=$('sort').value;visible.sort((a,b)=>key==='original'?a.original-b.original:(a[key]===null?1:b[key]===null?-1:b[key]-a[key]||a.original-b.original));
+const body=$('rows');body.replaceChildren();for(const r of visible){const tr=document.createElement('tr');tr.dataset.dramaId=r.id;tr.dataset.account=r.account;cell(tr,r.account_name);cell(tr,number(r.order),'num');const poster=cell(tr,'');const img=document.createElement('img');img.src=data.images[r.account+':'+r.id];img.alt=r.title;img.className='cover';img.loading='lazy';poster.append(img);
+const title=cell(tr,'','title'),en=document.createElement('b'),zh=document.createElement('div');en.textContent=r.title;zh.textContent=r.title_zh;zh.className='zh';title.append(en,zh);const details=document.createElement('details'),summary=document.createElement('summary'),description=document.createElement('p');summary.textContent='题材与中文简介';description.textContent=(r.genre||'题材待补')+'。'+r.description_zh;details.append(summary,description);title.append(details);
+cell(tr,number(r.initial),'num');cell(tr,number(r.yesterday),'num');cell(tr,number(r.today),'num');cell(tr,signed(r.delta),'num '+(r.delta>0?'gain':r.delta<0?'loss':''));cell(tr,percent(r.rate),'num');cell(tr,signed(r.previousCumulative),'num');cell(tr,percent(r.previousCumulativeRate),'num');cell(tr,signed(r.cumulative),'num');cell(tr,percent(r.cumulativeRate),'num');cell(tr,time(r.firstAt),'time');cell(tr,time(r.yesterdayAt),'time');cell(tr,time(r.todayAt),'time');cell(tr,number(r.frontend),'num');cell(tr,number(r.lastViews),'num');cell(tr,signed(r.lastDelta),'num');cell(tr,percent(r.lastRate),'num');cell(tr,time(r.lastAt),'time');body.append(tr);}
+if(!visible.length){const tr=document.createElement('tr'),td=cell(tr,'所选条件下没有实际采集记录。','empty');td.colSpan=21;body.append(tr);}
+const common=visible.filter(r=>r.delta!==null),commonBase=sumKnown(common,'yesterday'),delta=sumKnown(common,'delta'),cumulativeRows=visible.filter(r=>r.cumulative!==null),cumulativeBase=sumKnown(cumulativeRows,'initial'),cumulative=sumKnown(cumulativeRows,'cumulative');
+$('initialTotal').textContent=number(sumKnown(visible,'initial'));$('yesterdayTotal').textContent=number(sumKnown(visible,'yesterday'));$('todayTotal').textContent=number(sumKnown(visible,'today'));$('deltaTotal').textContent=signed(delta);$('cumulativeTotal').textContent=signed(cumulative);$('dayRate').textContent=common.length+'部可比，涨跌幅 '+percent(commonBase?delta/commonBase:null);$('cumulativeRate').textContent=cumulativeRows.length+'部可比，涨跌幅 '+percent(cumulativeBase?cumulative/cumulativeBase:null);$('yesterdayCount').textContent=prior+'，'+visible.filter(r=>r.yesterday!==null).length+'部有记录';$('todayCount').textContent=selected+'，'+visible.filter(r=>r.today!==null).length+'部有记录';
+const lastCommon=visible.filter(r=>r.lastDelta!==null),lastBase=sumKnown(lastCommon,'lastViews'),lastChange=sumKnown(lastCommon,'lastDelta');$('lastDeltaTotal').textContent=signed(lastChange);$('lastRateTotal').textContent=lastCommon.length+'部可比，涨跌幅 '+percent(lastBase?lastChange/lastBase:null);$('status').textContent='显示 '+visible.length+' 部；'+visible.filter(r=>r.today!==null&&r.yesterday===null).length+' 部在前一日没有记录。';$('asOf').textContent='统计日：'+selected+'；前一日：'+prior+'。已保存 '+snapshots.length+' 次快照，日期：'+knownDays.join('、')+'。';$('yesterdayHeader').textContent=(selected===data.reportDay?'昨天':'前一日')+'播放量（'+prior+'）';$('todayHeader').textContent=(selected===data.reportDay?'今天':'所选日')+'播放量（'+selected+'）';
+const missing=[];if(!knownDays.includes(selected))missing.push('统计日 '+selected);if(!knownDays.includes(prior))missing.push('前一日 '+prior);$('missingMessage').hidden=!missing.length;$('missingMessage').textContent='未采集：'+missing.join('、')+'。缺少记录的播放量、增量和涨幅显示“—”。';}
+for(const id of ['reportDate','account','query','sort','onlyObserved'])$(id).addEventListener('input',draw);
+$('downloadCsv').addEventListener('click',()=>{const csvCell=v=>v===null||v===undefined?'':typeof v==='number'?String(v):'"'+String(v).replaceAll('"','""')+'"';const lines=[['账号','序号','英文名','中文名','初始播放量（折算次）','前一日播放量（折算次）','所选日播放量（折算次）','所选日较前一日增加','所选日较前一日涨跌幅','前一日较初始增加','前一日较初始涨跌幅','所选日较初始增加','所选日较初始涨跌幅','首次记录时间','前一日记录时间','所选日记录时间','本次已采前端整数','上次实际播放量','较上次增加','较上次涨幅','上次实际采集时间']];for(const r of visible)lines.push([r.account_name,r.order,r.title,r.title_zh,r.initial,r.yesterday,r.today,r.delta,r.rate===null?'':(r.rate*100).toFixed(8)+'%',r.previousCumulative,r.previousCumulativeRate===null?'':(r.previousCumulativeRate*100).toFixed(8)+'%',r.cumulative,r.cumulativeRate===null?'':(r.cumulativeRate*100).toFixed(8)+'%',time(r.firstAt),time(r.yesterdayAt),time(r.todayAt),r.frontend,r.lastViews,r.lastDelta,r.lastRate===null?'':(r.lastRate*100).toFixed(8)+'%',time(r.lastAt)]);const url=URL.createObjectURL(new Blob(['\uFEFF'+lines.map(row=>row.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='三账号_初始每日对比_'+$('reportDate').value+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
+draw();
+})();
+</script>
+</body></html>

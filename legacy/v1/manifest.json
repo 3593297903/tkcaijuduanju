@@ -1,0 +1,53 @@
+{
+  "version": "legacy-v1-2026-10-28",
+  "files": [
+    {
+      "path": "prepare_pipeline.py",
+      "sha256": "d8d73abca677e06261c20ff88f04384664f938f5fea9106d9a4560d84718afc2",
+      "bytes": 3207
+    },
+    {
+      "path": "prepare_reports.py",
+      "sha256": "652ebd69322d864099c4b9ae2824e1533a290e5905571421482aade7bc8bc55f",
+      "bytes": 18502
+    },
+    {
+      "path": "trend_analysis.py",
+      "sha256": "310cf44fc7a498eca47f93e26f82a2eea0b098416473a81db082eb42787d837e",
+      "bytes": 7190
+    },
+    {
+      "path": "build_trend_report.py",
+      "sha256": "e95d908601c8114fd427bc8da1e066505753540998a6587ea0d2771501e062b8",
+      "bytes": 6180
+    },
+    {
+      "path": "initial_daily_template.html",
+      "sha256": "2147c3db2b8ff613138ec6c3622a1e92be3e29778cbff7e2a36e94c4d6cb54e3",
+      "bytes": 14107
+    },
+    {
+      "path": "trend_dashboard_template.html",
+      "sha256": "d21ce36707df385c7a60d6ed4baf8d8b48a22369edf144aac3abbab061d4225d",
+      "bytes": 12565
+    },
+    {
+      "path": "full_numbers/build_workbooks.mjs",
+      "sha256": "2057da5f7fe43a1b8f62b3ca1b0684dd985987cac204c4d6ddcf6776881f92a7",
+      "bytes": 11777
+    },
+    {
+      "path": "full_numbers/verify_and_package.py",
+      "sha256": "8850dff1064507c55f50074a6caa71d210cb570db4b916167b42c7695fa5353a",
+      "bytes": 7039
+    },
+    {
+      "path": "统计口径.md",
+      "sha256": "4195897877bc4bef12b3329fd5bb2d90d869586be6ba8d7de557867410cafabd",
+      "bytes": 1733
+    }
+  ],
+  "provenance": "Byte-identical copies of the original 2026-10-28 local report and analysis scripts.",
+  "historical_snapshots": 21,
+  "dramas": 384
+}

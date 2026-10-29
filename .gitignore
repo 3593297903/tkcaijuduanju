@@ -1,0 +1,15 @@
+_local/
+state/
+data/
+reports/
+node_modules/
+__pycache__/
+*.py[cod]
+*.sqlite*
+*.db
+.env
+.env.*
+*.har
+*.local.json
+request-specs/
+.worktrees/
