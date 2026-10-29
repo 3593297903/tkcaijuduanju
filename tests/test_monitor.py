@@ -1,4 +1,5 @@
 import contextlib
+import csv
 from datetime import timedelta
 import io
 import json
@@ -287,6 +288,41 @@ class AnalysisTests(LocalCase):
         self.assertNotIn('src="https://', html)
         workbook = json.loads((folder / "workbook_configs.json").read_text("utf-8"))
         self.assertEqual(workbook[0]["rows"][0]["today_views"], 123456789)
+
+    def test_emitted_csv_neutralizes_formula_strings_without_changing_numbers_or_source_data(self):
+        dangerous = [whitespace + prefix + "1+1"
+                     for whitespace in ("", " ", "\t", "\r", "\n", "\r\n", "\v", "\f", " \t\r\n")
+                     for prefix in ("=", "+", "-", "@")]
+        records = [Record(f"{100 + index:019d}", value, 5, metadata={"description_zh": value, "description_en": value})
+                   for index, value in enumerate(dangerous)]
+        records.append(Record(ONE, "Ordinary title", 0, metadata={"description_en": "  Ordinary text"}))
+        self.store.commit_batch([Snapshot("csv-safety", "demo", "2020-01-03T04:00:00Z", "synthetic", tuple(records))])
+        report = build_report(self.store, self.config, "2020-01-03", "display")
+        folder = export_report(self.store, self.config, report, embed_covers=False)
+        with (folder / "Demo.csv").open("r", encoding="utf-8-sig", newline="") as stream:
+            emitted = list(csv.reader(stream))
+        headers = emitted[0]
+        csv_rows = {row[headers.index("id")]: dict(zip(headers, row)) for row in emitted[1:]}
+        self.assertEqual(len(emitted) - 1, len(records))
+        merged = json.loads((folder / "merged.json").read_text("utf-8"))
+        json_rows = {row["id"]: row for row in merged["rows"]}
+        html = (folder / "monitor.html").read_text("utf-8")
+        html_data = json.loads(html.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0])
+        html_rows = {row["id"]: row for row in html_data["days"]["2020-01-03"]["display"]["rows"]}
+        for index, original in enumerate(dangerous):
+            drama_id = f"{100 + index:019d}"
+            for field in ("title", "description_zh", "description_en"):
+                self.assertEqual(csv_rows[drama_id][field], "'" + original)
+                self.assertEqual(json_rows[drama_id][field], original)
+                self.assertEqual(html_rows[drama_id][field], original)
+        numeric = csv_rows[ONE]
+        self.assertEqual(numeric["today_views"], "0")
+        self.assertEqual(numeric["today_from_initial_delta"], "-100")
+        self.assertEqual(numeric["today_from_initial_rate"], "-1.0")
+        self.assertEqual(numeric["title"], "Ordinary title")
+        self.assertEqual(numeric["description_en"], "  Ordinary text")
+        self.assertIsInstance(json_rows[ONE]["today_from_initial_delta"], int)
+        self.assertIsInstance(json_rows[ONE]["today_from_initial_rate"], float)
 
 
 class HttpTests(LocalCase):

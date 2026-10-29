@@ -67,7 +67,10 @@ def export_report(store, config, report, output=None, embed_covers=True):
 def _csv_value(value):
     if isinstance(value, (list, dict)):
         return json.dumps(value, ensure_ascii=False)
-    # Keep integer values untouched: neither abbreviation nor scientific notation is generated.
+    # CSV quoting alone does not stop spreadsheet formula execution. Escape text
+    # before any leading whitespace; typed numeric deltas and rates stay numeric.
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
     return value
 
 
