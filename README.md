@@ -117,7 +117,7 @@ Node 环境需提供 `@oai/artifact-tool` 及其运行依赖。`TKMONITOR_NODE_M
 
 ## Windows 每日入口与可选计划任务
 
-`run_daily.cmd` 从自身目录执行 `collect --report --metric frontend`，不写死 Codex 或 Python 安装路径。可通过 `TKMONITOR_PYTHON` 指定 Python，通过 `TKMONITOR_CONFIG` 指定配置；默认分别为 `python`、仓库中的 `config.local.json`。可以追加 `--xlsx` 等采集选项。
+`run_daily.cmd` 从自身目录执行 `collect --report --metric frontend`，不写死 Codex 或 Python 安装路径。若存在本机私有的`runtime.local.cmd`，先加载其中环境设置。可通过 `TKMONITOR_PYTHON` 指定 Python，通过 `TKMONITOR_CONFIG` 指定配置；默认分别为 `python`、仓库中的 `config.local.json`。可以追加 `--xlsx` 等采集选项。`runtime.local.cmd`已被Git忽略，本机路径不会进入公共仓库。
 
 先完成一次真正在线采集并检查报告，再按需安装任务。下面只是手动可选命令，仓库不会自行安装计划任务。浏览器模式需要对应用户已登录且浏览器辅助通道可用：
 
@@ -125,14 +125,27 @@ Node 环境需提供 `@oai/artifact-tool` 及其运行依赖。`TKMONITOR_NODE_M
 schtasks /Create /TN "TikTokDramaMonitor" /SC DAILY /ST 16:30 /TR "E:\jianc\tkcaijuduanju\run_daily.cmd" /IT
 ```
 
-任务使用系统环境中的 Python/Node 设置，临时 PowerShell 环境变量不会自动传给未来的计划任务。退出码：`0` 完成，`2` 配置／采集／导出失败，`3` 报告缺少部分账号或所选指标全部缺失，`130` 用户中断。失败信息提供操作方向，不打印请求参数、Cookie 或授权头。
+任务使用系统环境或`runtime.local.cmd`中的 Python/Node 设置，临时 PowerShell 环境变量不会自动传给未来的计划任务。退出码：`0` 完成，`2` 配置／采集／导出失败，`3` 报告缺少部分账号或所选指标全部缺失，`130` 用户中断。失败信息提供操作方向，不打印请求参数、Cookie 或授权头。
 
 ## 验证
 
 ```powershell
-python -X utf8 -m unittest discover -v
+python -X utf8 -m unittest discover -s tests -v
 ```
 
 测试只使用模拟数据，覆盖不可变和重复迁移、事务回滚、缺日与零、同日多次快照、未来基线隔离、双指标隔离、配对分母、分页／认证／非 JSON／重试、陈旧 checkpoint、CLI 退出码及导出失败后的有效采集保留。HTTP transport 可注入，离线测试不调用 TikTok。
 
 已有历史的本机验收结果写入被忽略的 `_local/integration_result.json`。历史回放和离线测试通过不等于在线 HTTP 或 Chrome 已稳定；每次真实在线能力以单独保留的验证结果为准。
+
+2026-10-29已完成真实验证：三个账号均可由独立HTTP程序全量采集，最新213／70／104部，共387部，均取得接口整数；关闭参数准备页后复测成功，一键入口也已通过。详细结果见[验证记录](docs/verification-2026-10-29.md)。请求参数的跨日有效期仍需后续观察，失效时使用[Chrome请求更新模块](docs/browser-session.md)，不是重新逐剧点击采集。
+
+新增剧或原文无法与历史译文核对时，中文资料明确标记待补，不自动编写。新封面URL已保存，尚未下载的图片显示待采集；发布时间也不推算。默认采集、计算和报表不调用大模型。
+
+可选Node验证（已配置`TKMONITOR_NODE_MODULES`并安装表格引擎时运行）：
+
+```powershell
+node tests/test_chrome_request.mjs
+node --v8-pool-size=1 tests/test_workbook_export.mjs
+```
+
+第二项使用真实表格引擎校验部分指标缺失时的配对分母，不生成额外XLSX。测试需要允许启动本机Node子进程；受限沙箱可能需要额外的本地进程权限。

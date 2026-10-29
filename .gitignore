@@ -11,5 +11,6 @@ __pycache__/
 .env.*
 *.har
 *.local.json
+*.local.cmd
 request-specs/
 .worktrees/
