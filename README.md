@@ -27,6 +27,7 @@ python -X utf8 -m tkmonitor --config config.local.json status
 - 时间保存实际 UTC 时间；统计日按 `Asia/Shanghai`（UTC+8）计算。同账号同日取最后有效快照。
 - `display` 仅使用当时页面显示的缩写折算整数；无法恢复历史被省略的低位。`frontend` 仅使用保存的 `frontendInteger`、`numWatched` 或明确映射的前端整数。两条序列不会互相补值。
 - 每剧初始页面值固定保留；首次已知前端整数及其时间另列。历史报告只使用截至该快照已知的基线和资料，不泄露未来精确值。
+- 当前 HTTP 来源提供前端精确整数，不提供页面显示值，因此日常 `collect --report` 和 Windows 入口默认使用 `frontend`。历史精确覆盖可能稀疏，例如已有历史某日为 344/384；报表用 `metric_coverage` 和“已知数量”明确标示，允许部分覆盖，缺失值不补齐。精确序列的初始、昨天及上次对比必须已有相应精确观测；没有旧精确点时只展示首次精确基线和本次值，不借用页面值计算涨幅。
 - “昨天”固定指日历前一天。没有当天快照或某剧未出现时留空；“上次实际”单列该剧最近一次更早观察，可能是同日更早快照。按真实间隔小时另算折合 24 小时增量和线性涨幅。
 - 缺失为 `null`／CSV 空单元格／HTML 的 `—`，真实零保留 `0`，负变化保留负值。新增剧昨天、日增量和日涨幅留空；零分母的涨幅留空。
 - 比较合计仅包含两端都有对应指标的剧目，涨幅以同批剧目原值为分母。摘要同时显示已知数量和可比数量。
@@ -58,12 +59,12 @@ HTTP 需要用户已有授权浏览器实际发出的普通请求配置。没有
 只允许 HTTPS 的 `tiktok.com` 或其子域，阻止私有网络解析地址、Host 覆盖和跨主机重定向。每页检查状态、JSON、游标前进、唯一 ID 和末页 `hasMore=false`，并设置最大页数。超时、网络错误、429 和 5xx 有限重试；401/403、登录／验证 HTML、游标不前进、重复 ID、空结果或中途失败均不提交快照。失败响应保留在 `_local/state/raw/attempts/`，CLI 只输出固定的操作提示。
 
 ```powershell
-python -X utf8 -m tkmonitor --config config.local.json collect --report --metric display
+python -X utf8 -m tkmonitor --config config.local.json collect --report --metric frontend
 # 可选只采一个账号。
 python -X utf8 -m tkmonitor --config config.local.json collect --account epiccreation111
 ```
 
-同一批选择的账号全部验证通过后才事务提交。报表或 XLSX 在提交之后单独执行，导出失败不会回滚有效采集。缺少部分账号的报表明确标注，退出码为3。`status` 中的 `recent_attempts` 区分 `running`、`failed`、`valid`。
+同一批选择的账号全部验证通过后才事务提交。报表或 XLSX 在提交之后单独执行，导出失败不会回滚有效采集。缺少部分账号，或所选指标当日完全没有已知值时，报表会明确标注并返回退出码3；有效采集仍保留。`status` 中的 `recent_attempts` 区分 `running`、`failed`、`valid`。
 
 ## 浏览器与 checkpoint 接口
 
@@ -101,20 +102,22 @@ Chrome 辅助采集由独立集成运行，读取用户已授权页面的原始�
 
 每次 `report` 生成各账号的完整数字 CSV、`merged.json`、`monitor.html` 和 `workbook_configs.json`。HTML 无网络依赖，可直接双击打开；可切换历史日期、账号、统计口径、搜索和排序。英文标题先显示、中文名随后；94px 封面来自本机嵌入，简介可展开。未采日期明确提示缺失。`--no-covers` 可减小 HTML 体积。
 
+报表的 `account_coverage_complete` 表示账号快照齐全，`metric_coverage` 分别给出所选指标的已知条数、总条数及 complete／partial／missing 状态。`complete=true` 需要账号齐全且至少一个所选指标值已知；部分指标覆盖可以成功，但全部缺失会保留可核查文件、提示缺失并返回非零，始终不替换统计口径。
+
 `workbook_configs.json` 保持旧导出器的行和摘要字段，使用 `rows`／`records`、`summary`、`report_day`、`previous_day`、`last_day`。`row.image` 是可选本机封面绝对路径；数据为空时指标为 `null`。独立 Node 集成位于 `integrations/export_workbooks.mjs`；Python 核心不直接生成 XLSX。
 
 ```powershell
 $env:TKMONITOR_NODE = 'C:\path\to\node.exe'
 $env:TKMONITOR_NODE_MODULES = 'C:\path\to\node_modules'
 python -X utf8 -m tkmonitor --config config.local.json export-xlsx --day 2026-10-28 --metric display
-# 也可 collect --report --metric display --xlsx
+# 也可 collect --report --metric frontend --xlsx
 ```
 
 Node 环境需提供 `@oai/artifact-tool` 及其运行依赖。`TKMONITOR_NODE_MODULES` 指向包含该包的目录；未设置时使用 Node 正常模块解析。Python 会为导出器设置适合本机内存限制的 Node 运行参数；导出日志保存在报告目录。集成未安装或运行失败返回非零，已有 CSV／JSON／HTML 和数据库仍保留。
 
 ## Windows 每日入口与可选计划任务
 
-`run_daily.cmd` 从自身目录执行 `collect --report --metric display`，不写死 Codex 或 Python 安装路径。可通过 `TKMONITOR_PYTHON` 指定 Python，通过 `TKMONITOR_CONFIG` 指定配置；默认分别为 `python`、仓库中的 `config.local.json`。可以追加 `--xlsx` 等采集选项。
+`run_daily.cmd` 从自身目录执行 `collect --report --metric frontend`，不写死 Codex 或 Python 安装路径。可通过 `TKMONITOR_PYTHON` 指定 Python，通过 `TKMONITOR_CONFIG` 指定配置；默认分别为 `python`、仓库中的 `config.local.json`。可以追加 `--xlsx` 等采集选项。
 
 先完成一次真正在线采集并检查报告，再按需安装任务。下面只是手动可选命令，仓库不会自行安装计划任务。浏览器模式需要对应用户已登录且浏览器辅助通道可用：
 
@@ -122,7 +125,7 @@ Node 环境需提供 `@oai/artifact-tool` 及其运行依赖。`TKMONITOR_NODE_M
 schtasks /Create /TN "TikTokDramaMonitor" /SC DAILY /ST 16:30 /TR "E:\jianc\tkcaijuduanju\run_daily.cmd" /IT
 ```
 
-任务使用系统环境中的 Python/Node 设置，临时 PowerShell 环境变量不会自动传给未来的计划任务。退出码：`0` 完成，`2` 配置／采集／导出失败，`3` 报告缺少部分账号，`130` 用户中断。失败信息提供操作方向，不打印请求参数、Cookie 或授权头。
+任务使用系统环境中的 Python/Node 设置，临时 PowerShell 环境变量不会自动传给未来的计划任务。退出码：`0` 完成，`2` 配置／采集／导出失败，`3` 报告缺少部分账号或所选指标全部缺失，`130` 用户中断。失败信息提供操作方向，不打印请求参数、Cookie 或授权头。
 
 ## 验证
 

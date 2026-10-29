@@ -21,6 +21,10 @@ def _print(value):
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _report_status(report):
+    return {key: report[key] for key in ("metric", "complete", "account_coverage_complete", "missing_accounts", "metric_coverage", "warnings")}
+
+
 def parser():
     result = argparse.ArgumentParser(description="Local Short Drama Monitor (Asia/Shanghai)")
     result.add_argument("--config", default="config.local.json", help="Portable local config path")
@@ -37,7 +41,8 @@ def parser():
     collect.add_argument("--day", default=None, help="Expected Beijing day; defaults to today, never inferred from an old file")
     collect.add_argument("--account", action="append", help="Restrict to configured account(s)")
     collect.add_argument("--report", action="store_true", help="Export a report after the valid collection commits")
-    collect.add_argument("--metric", choices=("display", "frontend"), default="display")
+    collect.add_argument("--metric", choices=("display", "frontend"), default="frontend",
+                         help="Report metric; defaults to frontend because HTTP supplies precise counts")
     collect.add_argument("--xlsx", action="store_true", help="Also invoke the optional Node exporter after reporting")
     xlsx = commands.add_parser("export-xlsx", help="Invoke the separate optional Node workbook integration")
     xlsx.add_argument("--day", default=None)
@@ -85,8 +90,7 @@ def run(args):
         elif args.command == "report":
             report = build_report(store, config, args.day or today(), args.metric)
             output = export_report(store, config, report, args.output, not args.no_covers)
-            _print({"output": str(output), "metric": report["metric"], "complete": report["complete"],
-                    "missing_accounts": report["missing_accounts"], "summary": report["summary"]})
+            _print({"output": str(output), **_report_status(report), "summary": report["summary"]})
             return 0 if report["complete"] else 3
         elif args.command == "export-xlsx":
             folder = config.resolve(args.folder) if args.folder else config.report_dir / (args.day or today()) / args.metric
@@ -121,7 +125,7 @@ def run(args):
             if args.report or args.xlsx:
                 report = build_report(store, config, expected_day, args.metric)
                 folder = export_report(store, config, report)
-                _print({"report": str(folder), "metric": args.metric, "complete": report["complete"]})
+                _print({"report": str(folder), **_report_status(report)})
                 if args.xlsx:
                     _print(export_xlsx(config, folder))
                 return 0 if report["complete"] else 3

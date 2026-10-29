@@ -151,8 +151,19 @@ def build_report(store, config, day, metric="display"):
             "last_day": local_day(before[-1].captured_at) if before else None, "metric": metric,
             "summary": summary, "rows": rows, "records": rows})
         all_rows.extend(rows)
+    summary = summarize(all_rows)
+    known, total = summary["today_count"], summary["count"]
+    metric_coverage = {"known": known, "total": total,
+                       "status": "missing" if not known else "complete" if known == total else "partial"}
+    warnings = []
+    if missing:
+        warnings.append("Some configured accounts have no valid snapshot on the selected day.")
+    if not known:
+        warnings.append(f"No saved {metric} play counts are available on the selected day; collect this metric or choose a day with known values. No other metric was substituted.")
     available_days = sorted({local_day(snapshot.captured_at) for snapshot in store.snapshots() if snapshot.account in config.handles})
     return {"schema": "tkmonitor.report/v1", "timezone": "Asia/Shanghai", "report_day": day,
             "previous_day": previous_day, "metric": metric, "metric_label": METRIC_LABELS[metric],
-            "complete": not missing, "missing_accounts": missing, "available_days": available_days,
-            "summary": summarize(all_rows), "accounts": reports, "rows": all_rows}
+            "complete": not missing and known > 0, "account_coverage_complete": not missing,
+            "metric_coverage": metric_coverage, "warnings": warnings,
+            "missing_accounts": missing, "available_days": available_days,
+            "summary": summary, "accounts": reports, "rows": all_rows}

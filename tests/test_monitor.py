@@ -229,6 +229,24 @@ class AnalysisTests(LocalCase):
         self.assertIsNone(precise["rows"][0]["last_views"])
         self.assertIsNone(precise["rows"][0]["last_delta"])
 
+    def test_all_missing_selected_metric_is_flagged_without_substitution(self):
+        report = build_report(self.store, self.config, "2020-01-01", "frontend")
+        self.assertFalse(report["complete"])
+        self.assertTrue(report["account_coverage_complete"])
+        self.assertEqual(report["metric_coverage"], {"known": 0, "total": 1, "status": "missing"})
+        self.assertTrue(report["warnings"])
+        self.assertIsNone(report["summary"]["today_total"])
+        self.assertIsNone(report["rows"][0]["today_views"])
+
+    def test_partial_precise_coverage_is_successful_and_real_zero_is_known(self):
+        self.store.commit_batch([Snapshot("partial", "demo", "2020-01-04T04:00:00Z", "synthetic", (
+            Record(ONE, "One", 5, 0), Record(TWO, "Two", 20, None)))])
+        report = build_report(self.store, self.config, "2020-01-04", "frontend")
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["metric_coverage"], {"known": 1, "total": 2, "status": "partial"})
+        self.assertEqual(report["summary"]["today_total"], 0)
+        self.assertIsNone(report["rows"][1]["today_views"])
+
     def test_zero_denominator_has_delta_but_no_rate_and_negative_is_retained(self):
         self.store.commit_batch([snap("2020-01-04T04:00:00Z", 5)])
         report = build_report(self.store, self.config, "2020-01-04")
@@ -525,6 +543,37 @@ class CheckpointAndCliTests(LocalCase):
         self.source_config([{"handle": "demo", "source": {"type": "checkpoint", "path": "fresh.json"}}])
         with patch("tkmonitor.cli.export_report", side_effect=MonitorError("Synthetic export failure")):
             self.assertEqual(self.cli("collect", "--report")[0], 2)
+        self.assertEqual(self.store.status()["snapshots"], 1)
+        self.assertEqual(self.store.status()["recent_attempts"][0]["status"], "valid")
+
+    def test_report_with_zero_selected_metric_coverage_exits_nonzero_and_keeps_reviewable_outputs(self):
+        import_history(self.store, self.config, self.fixture_history())
+        code, out, _ = self.cli("report", "--day", "2020-01-01", "--metric", "frontend", "--no-covers")
+        self.assertEqual(code, 3)
+        result = json.loads(out)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["metric_coverage"]["known"], 0)
+        self.assertTrue(result["warnings"])
+        saved = json.loads((self.config.report_dir / "2020-01-01/frontend/merged.json").read_text("utf-8"))
+        self.assertIsNone(saved["rows"][0]["today_views"])
+        html = (self.config.report_dir / "2020-01-01/frontend/monitor.html").read_text("utf-8")
+        self.assertIn("所选指标没有已保存的播放量", html)
+
+    def test_daily_collect_defaults_to_frontend_and_wrong_metric_does_not_rollback_collection(self):
+        captured = iso_time(now_utc() - timedelta(seconds=1))
+        write_json(self.root / "fresh.json", snap(captured, None, precise=4).as_dict())
+        self.source_config([{"handle": "demo", "source": {"type": "checkpoint", "path": "fresh.json"}}])
+        code, _, _ = self.cli("collect", "--report")
+        self.assertEqual(code, 0)
+        report_dir = self.config.report_dir / local_day(captured)
+        precise = json.loads((report_dir / "frontend/merged.json").read_text("utf-8"))
+        self.assertTrue(precise["complete"])
+        self.assertEqual(precise["summary"]["today_total"], 4)
+        code, out, _ = self.cli("collect", "--report", "--metric", "display")
+        self.assertEqual(code, 3)
+        self.assertIn('"status": "missing"', out)
+        display = json.loads((report_dir / "display/merged.json").read_text("utf-8"))
+        self.assertIsNone(display["summary"]["today_total"])
         self.assertEqual(self.store.status()["snapshots"], 1)
         self.assertEqual(self.store.status()["recent_attempts"][0]["status"], "valid")
 
