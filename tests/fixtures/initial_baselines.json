@@ -1,0 +1,8 @@
+{
+  "schema": "short-drama-initial-baselines/v1",
+  "timezone": "Asia/Shanghai",
+  "records": [
+    {"account": "demo", "id": "0000000000000000001", "title": "Synthetic One", "views": 100, "viewsRaw": "100", "capturedAt": "2020-01-01T01:00:00Z", "snapshotId": "demo:first", "metric": "page_display_equivalent_integer"},
+    {"account": "demo", "id": "0000000000000000002", "title": "Synthetic Two", "views": 20, "viewsRaw": "20", "capturedAt": "2020-01-03T03:00:00Z", "snapshotId": "demo:third", "metric": "page_display_equivalent_integer"}
+  ]
+}

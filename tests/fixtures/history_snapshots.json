@@ -1,0 +1,9 @@
+{
+  "schema": "short-drama-history/v1",
+  "timezone": "Asia/Shanghai",
+  "snapshots": [
+    {"id": "demo:first", "account": "demo", "capturedAt": "2020-01-01T01:00:00Z", "source": "synthetic fixture", "records": [{"id": "0000000000000000001", "title": "Synthetic One", "views": 100, "viewsRaw": "100"}]},
+    {"id": "demo:second", "account": "demo", "capturedAt": "2020-01-01T02:00:00Z", "source": "synthetic fixture", "records": [{"id": "0000000000000000001", "title": "Synthetic One", "views": 110, "viewsRaw": "110"}]},
+    {"id": "demo:third", "account": "demo", "capturedAt": "2020-01-03T03:00:00Z", "source": "synthetic fixture", "records": [{"id": "0000000000000000001", "title": "Synthetic One", "views": 0, "viewsRaw": "0", "frontendInteger": 7}, {"id": "0000000000000000002", "title": "Synthetic Two", "views": 20, "viewsRaw": "20", "frontendInteger": 9}]}
+  ]
+}

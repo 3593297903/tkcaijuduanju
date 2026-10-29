@@ -1,0 +1,23 @@
+{
+  "state_dir": "_local/state",
+  "accounts": [
+    {
+      "handle": "epiccreation111",
+      "name": "Epic Creation",
+      "prefix": "Epic_Creation",
+      "source": {"type": "http", "request_spec": "request-specs/epiccreation111.local.json"}
+    },
+    {
+      "handle": "vervedramaeg",
+      "name": "VerveDrama",
+      "prefix": "VerveDrama",
+      "source": {"type": "http", "request_spec": "request-specs/vervedramaeg.local.json"}
+    },
+    {
+      "handle": "babydrama_ca",
+      "name": "Baby Drama-ca",
+      "prefix": "Baby_Drama_ca",
+      "source": {"type": "http", "request_spec": "request-specs/babydrama_ca.local.json"}
+    }
+  ]
+}
