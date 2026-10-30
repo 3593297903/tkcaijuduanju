@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl, quote, unquote_plus, urlsplit, urlunsplit, u
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from .config import read_json
-from .model import (MonitorError, Record, Snapshot, iso_time, now_utc, parse_display,
+from .model import (ID_PATTERN, MonitorError, Record, Snapshot, iso_time, now_utc, parse_display,
                     parse_time, validate_snapshot)
 
 
@@ -260,7 +260,7 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
     initial_offset = _numeric_cursor(cursor)
     if drama_list and initial_offset != 0:
         raise MonitorError("TikTok drama_list collection must start at numeric cursor zero to cover the whole account.")
-    records, identifiers, seen = [], set(), {cursor}
+    records, identifiers, seen, references = [], set(), {cursor}, set()
     started = clock()
     transport = transport or urllib_transport
     for page_number in range(1, maximum + 1):
@@ -300,12 +300,24 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
         if drama_list:
             _drama_offset(cursor, following, len(items))
         for item in items:
+            # drama_list can include an ID-only reference alongside its complete
+            # item. It occupies a raw pagination slot, but contains no play count.
+            # Resolve it within this full run; never turn it into a blank record
+            # or silently drop an ID whose complete data was not returned.
+            if drama_list and isinstance(item, dict) and set(item) == {"dramaID"}:
+                reference = item["dramaID"]
+                if not isinstance(reference, str) or not ID_PATTERN.fullmatch(reference):
+                    raise MonitorError("ID-only drama references must contain valid 19-digit strings.")
+                references.add(reference)
+                continue
             record = _api_record(item, spec.get("record_fields"))
             if record.id in identifiers:
                 raise MonitorError("Duplicate drama ID across pages; no partial snapshot was committed.")
             identifiers.add(record.id)
             records.append(record)
         if not has_more:
+            if references - identifiers:
+                raise MonitorError("Unresolved ID-only drama reference; no incomplete snapshot was committed.")
             captured = iso_time(clock())
             return validate_snapshot(Snapshot(account + ":" + captured, account, captured,
                 "authorized TikTok HTTP response", tuple(records), iso_time(started)))

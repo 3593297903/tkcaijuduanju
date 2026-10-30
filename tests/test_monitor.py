@@ -495,6 +495,50 @@ class HttpTests(LocalCase):
         self.assertEqual(len(snapshot.records), 23)
         self.assertIn("cursor=20", self.calls[1][0])
 
+    def test_tiktok_id_only_references_resolve_to_one_complete_record(self):
+        self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+        write_json(self.spec_path, self.spec)
+        full = {"dramaID": ONE, "dramaName": "Synthetic complete drama", "numWatched": "12345"}
+        sequence = [self.response(items=[{"dramaID": ONE}, full], cursor="2")]
+        result = collect_http("demo", self.spec_path, self.transport(sequence))
+        self.assertEqual(len(result.records), 1)
+        self.assertEqual((result.records[0].title, result.records[0].frontend_integer), (full["dramaName"], 12345))
+
+    def test_tiktok_reference_resolution_keeps_raw_pagination_offsets(self):
+        self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+        write_json(self.spec_path, self.spec)
+        sequence = [self.response(items=[{"dramaID": TWO}, *self.drama_items(1, 1)], more=True, cursor="2"),
+                    self.response(items=self.drama_items(2, 1), cursor="3")]
+        result = collect_http("demo", self.spec_path, self.transport(sequence))
+        self.assertEqual([record.id for record in result.records], [ONE, TWO])
+        self.assertIn("cursor=2", self.calls[1][0])
+
+    def test_tiktok_unresolved_reference_cannot_be_silently_dropped(self):
+        self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+        write_json(self.spec_path, self.spec)
+        sequence = [self.response(items=[{"dramaID": TWO}, *self.drama_items(1, 1)], cursor="2")]
+        with self.assertRaisesRegex(MonitorError, "Unresolved.*reference"):
+            result = collect_http("demo", self.spec_path, self.transport(sequence))
+            self.store.commit_batch([result])
+        self.assertEqual(self.store.status()["snapshots"], 0)
+
+    def test_tiktok_complete_duplicates_still_fail_even_with_references(self):
+        self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+        write_json(self.spec_path, self.spec)
+        first = {"dramaID": ONE, "dramaName": "First title", "numWatched": "9"}
+        second = {"dramaID": ONE, "dramaName": "Conflicting title", "numWatched": "10"}
+        sequence = [self.response(items=[{"dramaID": ONE}, first, second], cursor="3")]
+        with self.assertRaisesRegex(MonitorError, "Duplicate drama ID"):
+            collect_http("demo", self.spec_path, self.transport(sequence))
+
+    def test_only_exact_tiktok_id_references_are_resolved(self):
+        for item in ({"dramaID": 1}, {"dramaID": "invalid"}, {"dramaID": ONE, "dramaName": "No count"}):
+            with self.subTest(item=item):
+                self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+                write_json(self.spec_path, self.spec)
+                with self.assertRaises(MonitorError):
+                    collect_http("demo", self.spec_path, self.transport([self.response(items=[item], cursor="1")]))
+
     def test_tiktok_drama_list_cannot_override_its_actual_cursor_parameter(self):
         self.spec.update(url="https://www.tiktok.com/api/drama/user/drama_list/?cursor=20", initial_cursor="0", cursor_param="page")
         write_json(self.spec_path, self.spec)
