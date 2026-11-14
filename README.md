@@ -1,6 +1,6 @@
 # 短剧采集与监测
 
-`tkmonitor` 是仅依赖 Python 标准库的本机监测工具。采集来源、SQLite 历史、指标计算和报表导出相互独立。核心不调用大模型，不翻译或编写剧情。新增资料或发生变化的原文需要翻译时，报表明确显示“待翻译／待补充”。
+`tkmonitor` 的采集、SQLite 历史、指标计算和 CSV／JSON／HTML 报表仅依赖 Python 标准库。完整日报的封面校验与转换另需可选的 Pillow，Excel 导出另需 Node 表格引擎。核心不调用大模型，不翻译或编写剧情。新增资料或发生变化的原文需要翻译时，报表明确显示“待翻译／待补充”。
 
 `legacy/v1/` 保留旧方法的只读归档；`legacy/v1/manifest.json` 记录原文件 SHA-256。原始业务数据、浏览器资料、Cookie、签名请求、SQLite 和报表只保存在被 Git 忽略的本机目录中。`config.example.json` 与测试数据可公开；`config.local.json`、`request-specs/` 和 `_local/` 不提交。
 
@@ -10,7 +10,7 @@
 
 ```powershell
 Copy-Item config.example.json config.local.json
-python -X utf8 -m tkmonitor --config config.local.json import-history --source E:/jianc/outputs/monitoring_2026-10-28
+python -X utf8 -m tkmonitor --config config.local.json import-history --source C:/path/to/history
 python -X utf8 -m tkmonitor --config config.local.json report --day 2026-10-28 --metric display
 python -X utf8 -m tkmonitor --config config.local.json status
 ```
@@ -113,16 +113,47 @@ python -X utf8 -m tkmonitor --config config.local.json export-xlsx --day 2026-10
 # 也可 collect --report --metric frontend --xlsx
 ```
 
-Node 环境需提供 `@oai/artifact-tool` 及其运行依赖。`TKMONITOR_NODE_MODULES` 指向包含该包的目录；未设置时使用 Node 正常模块解析。Python 会为导出器设置适合本机内存限制的 Node 运行参数；导出日志保存在报告目录。集成未安装或运行失败返回非零，已有 CSV／JSON／HTML 和数据库仍保留。
+Node 环境需提供 `@oai/artifact-tool` 及其运行依赖；该引擎需由运行环境提供，仓库未包含其安装包。`TKMONITOR_NODE_MODULES` 指向包含该包的目录；未设置时使用 Node 正常模块解析。Python 为每个账号单独启动进程，采用 `--no-opt`、384 MB V8 堆等已经用于本机日报的参数，避免多个工作簿累计占用内存。每个账号日志保存在报告目录的 `PREFIX_xlsx.stdout.log`／`PREFIX_xlsx.stderr.log`。导出后重新读取 XLSX，逐条核对 ID、标题、播放量、增量、涨幅、合计和图片数量。集成未安装或运行失败返回非零，已有 CSV／JSON／HTML 和数据库仍保留。
+
+## 完整日报、资料继承与核验打包
+
+最近使用的日报收尾步骤已纳入正式命令，不再需要仓库外的日期脚本或固定输出目录：
+
+```powershell
+# 完整日报的额外图片依赖；仅采集数字不需要安装。
+python -m pip install Pillow
+# 全量采集 → 封面补齐及简介来源标记 → HTML/CSV/JSON → 各账号 Excel → 核验。
+python -X utf8 -m tkmonitor --config config.local.json collect --report --metric frontend --finalize --xlsx
+# 可以追加 --delivery 路径，把核验通过的整套文件复制到指定目录。
+python -X utf8 -m tkmonitor --config config.local.json collect --finalize --xlsx --delivery _local/delivery/today
+```
+
+封面只使用采集时保存的页面缩略图 URL，保留 HTTPS/TLS 校验、TikTok CDN 域名限制、同主机跳转限制、8 MB 大小限制和图片解码检查。优先复用本机已有图片；需要下载时最多四个并发、每张最多三次请求，每次超时十二秒。签名 URL 和原始错误消息不进入完成日志；图片转为 Excel 可用的 PNG。该图片下载器与已验证的日常方法一致，不采用 shell 中的代理环境变量。
+
+中文简介首先使用数据库中随对应英文原文保存的译文。原文变化后旧译文失效；可以从不晚于所选日期的已有日报继承同账号、ID、英文剧名对应的中文参考资料，但始终标注“历史参考，未核对本次英文原文”，不作为已核对译文写回数据库。没有中文资料时保留本次英文原文并标记待翻译。不会自动生成中文剧情。
+
+`--finalize` 核查账号和整数覆盖、每条封面、英文简介、所有数值和快照指纹，输出 `media_validation.json`。数值或封面、原文不齐时返回非零，保留可检查的报表与已提交的采集数据。暂时无法联网下载图片、或只需重做 Excel 时，可单独重跑，不会新增一次采集：
+
+```powershell
+python -X utf8 -m tkmonitor --config config.local.json finalize --day YYYY-MM-DD --metric frontend
+# 只使用本机已有图片。
+python -X utf8 -m tkmonitor --config config.local.json finalize --day YYYY-MM-DD --no-download
+python -X utf8 -m tkmonitor --config config.local.json export-xlsx --day YYYY-MM-DD --metric frontend
+python -X utf8 -m tkmonitor --config config.local.json package --day YYYY-MM-DD --output _local/delivery/selected-day
+```
+
+`package` 在复制前校验整个批次，要求完整指标和通过资料核验的相同快照，以及与 `merged.json` 一致的工作簿配置；重新读取每个保存后的工作簿核对数值及图片数量。成功后输出 `workbooks_verified.json`，复制 HTML、JSON、三个账号各自的 CSV／XLSX（账号数量可配置）及核验记录。无 `--output` 时只在原报告目录核验，不额外复制。此核验不代表重新请求了在线接口；分页和原始整数由采集阶段验证。
+
+大 HTML 使用流式 JSON 写入同目录临时文件，完成后原子替换旧网页。写入中断不会把已经生成的网页清空。
 
 ## Windows 每日入口与可选计划任务
 
-`run_daily.cmd` 从自身目录执行 `collect --report --metric frontend`，不写死 Codex 或 Python 安装路径。若存在本机私有的`runtime.local.cmd`，先加载其中环境设置。可通过 `TKMONITOR_PYTHON` 指定 Python，通过 `TKMONITOR_CONFIG` 指定配置；默认分别为 `python`、仓库中的 `config.local.json`。可以追加 `--xlsx` 等采集选项。`runtime.local.cmd`已被Git忽略，本机路径不会进入公共仓库。
+`run_daily.cmd` 从自身目录执行 `collect --report --metric frontend --finalize --xlsx`，包括上述完整日报收尾，不写死 Codex 或 Python 安装路径。若存在本机私有的`runtime.local.cmd`，先加载其中环境设置。可通过 `TKMONITOR_PYTHON` 指定 Python，通过 `TKMONITOR_CONFIG` 指定配置；默认分别为 `python`、仓库中的 `config.local.json`。完整入口需要 Pillow 和 Node 表格引擎；只采集数字或只采单个账号时使用上面的独立 `collect` 命令。可以追加 `--day`、`--delivery` 等选项。`runtime.local.cmd`已被Git忽略，本机路径不会进入公共仓库。
 
 先完成一次真正在线采集并检查报告，再按需安装任务。下面只是手动可选命令，仓库不会自行安装计划任务。浏览器模式需要对应用户已登录且浏览器辅助通道可用：
 
 ```powershell
-schtasks /Create /TN "TikTokDramaMonitor" /SC DAILY /ST 16:30 /TR "E:\jianc\tkcaijuduanju\run_daily.cmd" /IT
+schtasks /Create /TN "TikTokDramaMonitor" /SC DAILY /ST 16:30 /TR "C:\path\to\tkcaijuduanju\run_daily.cmd" /IT
 ```
 
 任务使用系统环境或`runtime.local.cmd`中的 Python/Node 设置，临时 PowerShell 环境变量不会自动传给未来的计划任务。退出码：`0` 完成，`2` 配置／采集／导出失败，`3` 报告缺少部分账号或所选指标全部缺失，`130` 用户中断。失败信息提供操作方向，不打印请求参数、Cookie 或授权头。

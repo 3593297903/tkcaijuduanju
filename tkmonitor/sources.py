@@ -151,7 +151,7 @@ def _api_record(item, mapping=None, card=None):
     return Record(drama_id, title, display, frontend, raw, metadata)
 
 
-def _page(value, fields=None):
+def _page(value, fields=None, *, allow_empty_drama_list=False):
     fields = fields or {}
     if not isinstance(value, dict):
         raise MonitorError("Expected a JSON response object.")
@@ -160,8 +160,13 @@ def _page(value, fields=None):
         statuses.append(_field(value, fields["status"]))
     if any(status not in (0, "0") or isinstance(status, bool) for status in statuses):
         raise MonitorError("TikTok returned an API error; refresh the authorized browser session and private request specification.")
-    items = _field(value, fields.get("items", "dramaList"))
     has_more = _field(value, fields.get("has_more", "hasMore"))
+    items_field = fields.get("items", "dramaList")
+    if (allow_empty_drama_list and items_field == "dramaList"
+            and "dramaList" not in value and has_more is False and statuses):
+        items = []
+    else:
+        items = _field(value, items_field)
     if not isinstance(items, list) or not isinstance(has_more, bool):
         raise MonitorError("Response needs an items array and a boolean hasMore flag.")
     cursor = _field(value, fields.get("cursor", "cursor"))
@@ -296,7 +301,10 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
             value = json.loads(response.body)
         except (json.JSONDecodeError, UnicodeError) as exc:
             raise MonitorError("TikTok response is not valid JSON; check login or verification in the browser.") from exc
-        items, has_more, following = _page(value, spec.get("fields"))
+        # This endpoint may send a separate empty terminal page after a full page.
+        # The offset check below requires that such a page consumes no slots.
+        items, has_more, following = _page(
+            value, spec.get("fields"), allow_empty_drama_list=drama_list and page_number > 1)
         if drama_list:
             _drama_offset(cursor, following, len(items))
         for item in items:

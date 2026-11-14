@@ -5,6 +5,7 @@ import csv
 import json
 import mimetypes
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .analysis import build_report
 from .model import MonitorError
@@ -59,8 +60,21 @@ def export_report(store, config, report, output=None, embed_covers=True):
     payload = {"selected_day": report["report_day"], "selected_metric": report["metric"],
                "accounts": [{"handle": item["handle"], "name": item["name"]} for item in config.accounts],
                "days": days, "covers": covers}
-    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
-    (output / "monitor.html").write_text(HTML.replace("__TKMONITOR_DATA__", serialized), encoding="utf-8")
+    head, tail = HTML.split("__TKMONITOR_DATA__", 1)
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    escaped = str.maketrans({"<": "\\u003c", "\u2028": "\\u2028", "\u2029": "\\u2029"})
+    temporary_file = NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=output, prefix=".monitor-", suffix=".tmp", delete=False)
+    temporary_path = Path(temporary_file.name)
+    try:
+        with temporary_file as stream:
+            stream.write(head)
+            for chunk in encoder.iterencode(payload):
+                stream.write(chunk.translate(escaped))
+            stream.write(tail)
+        temporary_path.replace(output / "monitor.html")
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return output.resolve()
 
 

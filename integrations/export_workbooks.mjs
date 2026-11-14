@@ -73,6 +73,7 @@ for(const cfg of configs){
   sheet.getRange(`T${start}:T${end}`).setNumberFormat('yyyy-mm-dd hh:mm:ss');
   sheet.getRange(`C${start}:D${end}`).format.wrapText=true;
   sheet.getRange(`V${start}:W${end}`).format.wrapText=true;
+  sheet.getRange(`AA${start}:AA${end}`).format.wrapText=true;
   sheet.getRange(`A${start}:AE${end}`).format.rowHeightPx=106;
   sheet.getRange(`E${start}:Q${total}`).format.horizontalAlignment='right';
   sheet.getRange(`C${start}:C${end}`).format.font={name:'Arial',size:10,bold:true,color:'#355D89'};

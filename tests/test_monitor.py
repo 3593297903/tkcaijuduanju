@@ -495,6 +495,20 @@ class HttpTests(LocalCase):
         self.assertEqual(len(snapshot.records), 23)
         self.assertIn("cursor=20", self.calls[1][0])
 
+    def test_tiktok_empty_terminal_page_can_omit_drama_list(self):
+        self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
+        write_json(self.spec_path, self.spec)
+        first = self.response(items=self.drama_items(1, 20), more=True, cursor="20")
+        terminal = {"status_code": 0, "hasMore": False, "cursor": "20"}
+        snapshot = collect_http("demo", self.spec_path, self.transport([
+            first, self.response(body=json.dumps(terminal).encode())]))
+        self.assertEqual(len(snapshot.records), 20)
+        for changes in ({"hasMore": True}, {"cursor": "21"}, {"status_code": 7}):
+            with self.subTest(changes=changes):
+                invalid = self.response(body=json.dumps({**terminal, **changes}).encode())
+                with self.assertRaises(MonitorError):
+                    collect_http("demo", self.spec_path, self.transport([first, invalid]))
+
     def test_tiktok_id_only_references_resolve_to_one_complete_record(self):
         self.spec["url"] = "https://www.tiktok.com/api/drama/user/drama_list/?cursor=0"
         write_json(self.spec_path, self.spec)
