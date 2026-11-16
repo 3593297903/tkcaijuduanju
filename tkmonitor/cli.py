@@ -16,7 +16,7 @@ from .config import load_config
 from .delivery import package_report, verify_workbook, workbook_name
 from .media import finalize_report
 from .migration import import_history
-from .model import MonitorError, local_day, today
+from .model import MonitorError, SourceError, local_day, today
 from .reports import export_report
 from .sources import collect_external
 from .store import Store
@@ -51,6 +51,24 @@ def parser():
     collect.add_argument("--xlsx", action="store_true", help="Also invoke the optional Node exporter after reporting")
     collect.add_argument("--finalize", action="store_true", help="Complete thumbnails, label synopsis provenance and verify report coverage")
     collect.add_argument("--delivery", default=None, help="After finalization and XLSX export, verify and copy the complete delivery here")
+    collect.add_argument("--recover-request", action="store_true", help="On HTTP 401/403, prepare one resumable Chrome recovery task instead of repeatedly opening pages")
+    collect.add_argument("--allow-scroll-fallback", action="store_true", help="Allow at most one scroll in an explicitly requested browser recovery")
+    collect.add_argument("--browser-timeout", type=float, default=90, help="Browser preparation budget, 5..300 seconds")
+    onboard = commands.add_parser("onboard", help="Reuse an account request or prepare a resumable authorized-Chrome capture")
+    target = onboard.add_mutually_exclusive_group(required=True)
+    target.add_argument("--url", help="HTTPS TikTok account homepage")
+    target.add_argument("--resume", help="Private onboarding manifest returned by a previous invocation")
+    onboard.add_argument("--name", default=None)
+    onboard.add_argument("--day", default=None, help="Defaults to the actual Beijing collection day")
+    onboard.add_argument("--dry-run", action="store_true", help="Plan only: no requests, browser actions or writes")
+    onboard.add_argument("--new-task", action="store_true", help="Explicitly prepare a new task instead of reusing an interrupted pending capture")
+    onboard.add_argument("--allow-scroll-fallback", action="store_true", help="Allow one optional scroll; default is no scrolling")
+    onboard.add_argument("--browser-timeout", type=float, default=90, help="Browser preparation budget, 5..300 seconds")
+    onboard.add_argument("--report", action="store_true")
+    onboard.add_argument("--metric", choices=("display", "frontend"), default="frontend")
+    onboard.add_argument("--finalize", action="store_true")
+    onboard.add_argument("--xlsx", action="store_true")
+    onboard.add_argument("--delivery", default=None)
     finalize = commands.add_parser("finalize", help="Complete media and verify an already collected day without recollecting")
     finalize.add_argument("--day", default=None)
     finalize.add_argument("--metric", choices=("display", "frontend"), default="frontend")
@@ -65,6 +83,14 @@ def parser():
     xlsx.add_argument("--day", default=None)
     xlsx.add_argument("--metric", choices=("display", "frontend"), required=True)
     xlsx.add_argument("--folder", default=None, help="Folder already containing generated workbook_configs.json")
+    for command in (report, collect, onboard, finalize, xlsx, package):
+        command.add_argument("--allow-untranslated", action="store_true", help="Explicitly allow an English-only/raw export; full deliveries otherwise require Chinese titles and synopses")
+    translation = commands.add_parser("translation-tasks", help="Export only missing or changed-source Chinese translation work")
+    translation.add_argument("--day", default=None)
+    translation.add_argument("--metric", choices=("display", "frontend"), default="frontend")
+    translation.add_argument("--output", default=None)
+    translated = commands.add_parser("import-translations", help="Validate exact saved originals and import Chinese companion metadata without changing observations")
+    translated.add_argument("--input", required=True)
     return result
 
 
@@ -124,10 +150,86 @@ def export_xlsx(config, folder):
     return {"xlsx_export": "completed", "output": str(folder), "workbooks": verified}
 
 
+def export_collection(config, store, args):
+    """Export separately so a resumable onboarding never refetches committed data."""
+    expected_day = args.day or today()
+    if args.report or args.xlsx or args.finalize or args.delivery:
+        if not getattr(args, "allow_untranslated", False):
+            from .translations import require_chinese
+            require_chinese(store, config, expected_day, args.metric)
+        if args.finalize or args.delivery:
+            folder, report = finalize_report(store, config, expected_day, args.metric)
+        else:
+            report = build_report(store, config, expected_day, args.metric)
+            folder = export_report(store, config, report)
+        _print({"report": str(folder), **_report_status(report)})
+        if args.xlsx or args.delivery:
+            _print(export_xlsx(config, folder))
+        if (args.finalize and args.xlsx) or args.delivery:
+            _print(package_report(folder, config.resolve(args.delivery) if args.delivery else None))
+        return 0 if report["complete"] else 3
+    return 0
+
+
+def collect_and_export(config, store, args, progress=None):
+    selected = set(args.account or config.handles)
+    if not selected <= config.handles:
+        raise MonitorError("Requested collection account is not configured.")
+    expected_day = args.day or today()
+    attempt = store.start_attempt()
+    try:
+        if progress:
+            progress("collecting", {"attempt": attempt, "collected_day": expected_day})
+        snapshots = []
+        for account in config.accounts:
+            if account["handle"] in selected:
+                print("Collecting " + account["handle"] + " for Beijing day " + expected_day + ".", flush=True)
+                raw_dir = config.state_dir / "raw" / "attempts" / attempt / account["handle"]
+                try:
+                    snapshots.append(collect_external(config, account, expected_day, raw_dir))
+                except SourceError as exc:
+                    exc.account = account["handle"]
+                    raise
+        if progress:
+            progress("prepared", {"prepared_snapshots": [{"id": s.id, "fingerprint": s.digest} for s in snapshots]})
+        added = store.commit_batch(snapshots, selected)
+    except KeyboardInterrupt:
+        store.finish_attempt(attempt, "failed", "Collection interrupted; incomplete batch was not committed.")
+        raise
+    except Exception as exc:
+        message = str(exc) if isinstance(exc, MonitorError) else "Collection failed; inspect the local source and runtime. No partial batch was committed."
+        store.finish_attempt(attempt, "failed", message)
+        if isinstance(exc, MonitorError):
+            raise
+        raise MonitorError(message) from exc
+    store.finish_attempt(attempt, "valid", "Complete validated batch committed.")
+    if progress:
+        progress("collected", {"imported_snapshots": added})
+    _print({"collection": "valid", "attempt": attempt, "imported_snapshots": added,
+            "accounts": sorted(selected), "day": expected_day})
+    # The export remains strictly after the whole-batch transaction.
+    return export_collection(config, store, args)
+
+
 def run(args):
     config = load_config(args.config)
+    if args.command in {"onboard", "collect"} and not 5 <= args.browser_timeout <= 300:
+        raise MonitorError("Browser preparation budget must be between 5 and 300 seconds.")
+    if args.command == "onboard":
+        if args.resume and (args.dry_run or args.new_task or args.name or args.day or args.allow_scroll_fallback or args.report or args.finalize or args.xlsx or args.delivery or args.metric != "frontend" or args.browser_timeout != 90 or args.allow_untranslated):
+            raise MonitorError("Resume uses the saved task options; do not supply new target or execution options.")
+        from .onboarding import run_onboard
+        return run_onboard(config, args, collect_and_export, export_collection, _print)
     with Store(config.state_dir) as store:
-        if args.command == "import-history":
+        if args.command == "translation-tasks":
+            from .translations import translation_tasks
+            result = translation_tasks(store, config, args.day or today(), args.metric, output=args.output)
+            _print(result)
+            return 5 if result["pending"] else 0
+        elif args.command == "import-translations":
+            from .translations import import_translations
+            _print(import_translations(store, config, args.input))
+        elif args.command == "import-history":
             _print(import_history(store, config, args.source))
         elif args.command == "status":
             status = store.status()
@@ -138,59 +240,48 @@ def run(args):
             _print(status)
         elif args.command == "report":
             report = build_report(store, config, args.day or today(), args.metric)
+            if not args.allow_untranslated:
+                from .translations import require_chinese
+                require_chinese(store, config, report["report_day"], args.metric, report=report)
             output = export_report(store, config, report, args.output, not args.no_covers)
             _print({"output": str(output), **_report_status(report), "summary": report["summary"]})
             return 0 if report["complete"] else 3
         elif args.command == "export-xlsx":
             folder = config.resolve(args.folder) if args.folder else config.report_dir / (args.day or today()) / args.metric
+            if not args.allow_untranslated:
+                from .translations import require_chinese
+                from .config import read_json
+                saved = read_json(folder / "merged.json")
+                require_chinese(store, config, saved["report_day"], args.metric, report=saved)
             _print(export_xlsx(config, folder))
         elif args.command == "finalize":
+            if not args.allow_untranslated:
+                from .translations import require_chinese
+                require_chinese(store, config, args.day or today(), args.metric)
             output = config.resolve(args.output) if args.output else None
             folder, report = finalize_report(store, config, args.day or today(), args.metric, output, not args.no_download)
             _print({"output": str(folder), "media_coverage": report["media_coverage"], **_report_status(report)})
         elif args.command == "package":
             folder = config.resolve(args.folder) if args.folder else config.report_dir / (args.day or today()) / args.metric
+            if not args.allow_untranslated:
+                from .translations import require_chinese
+                from .config import read_json
+                saved = read_json(folder / "merged.json")
+                require_chinese(store, config, saved["report_day"], args.metric, report=saved)
             output = config.resolve(args.output) if args.output else None
             _print(package_report(folder, output))
         elif args.command == "collect":
-            selected = set(args.account or config.handles)
-            if not selected <= config.handles:
-                raise MonitorError("Requested collection account is not configured.")
-            expected_day = args.day or today()
-            attempt = store.start_attempt()
             try:
-                snapshots = []
-                for account in config.accounts:
-                    if account["handle"] in selected:
-                        print("Collecting " + account["handle"] + " for Beijing day " + expected_day + ".", flush=True)
-                        raw_dir = config.state_dir / "raw" / "attempts" / attempt / account["handle"]
-                        snapshots.append(collect_external(config, account, expected_day, raw_dir))
-                added = store.commit_batch(snapshots, selected)
-            except KeyboardInterrupt:
-                store.finish_attempt(attempt, "failed", "Collection interrupted; incomplete batch was not committed.")
-                raise
-            except Exception as exc:
-                message = str(exc) if isinstance(exc, MonitorError) else "Collection failed; inspect the local source and runtime. No partial batch was committed."
-                store.finish_attempt(attempt, "failed", message)
-                if isinstance(exc, MonitorError):
+                return collect_and_export(config, store, args)
+            except SourceError as exc:
+                if not args.recover_request or exc.code != "AUTH_REQUIRED":
                     raise
-                raise MonitorError(message) from exc
-            store.finish_attempt(attempt, "valid", "Complete validated batch committed.")
-            _print({"collection": "valid", "attempt": attempt, "imported_snapshots": added,
-                    "accounts": sorted(selected), "day": expected_day})
-            # Export follows the commit. An export failure can never roll back valid collection.
-            if args.report or args.xlsx or args.finalize or args.delivery:
-                if args.finalize or args.delivery:
-                    folder, report = finalize_report(store, config, expected_day, args.metric)
-                else:
-                    report = build_report(store, config, expected_day, args.metric)
-                    folder = export_report(store, config, report)
-                _print({"report": str(folder), **_report_status(report)})
-                if args.xlsx or args.delivery:
-                    _print(export_xlsx(config, folder))
-                if (args.finalize and args.xlsx) or args.delivery:
-                    _print(package_report(folder, config.resolve(args.delivery) if args.delivery else None))
-                return 0 if report["complete"] else 3
+                from .onboarding import account_lock, account_plan, create_browser_task, pending_result
+                with account_lock(config.path.parent, exc.account):
+                    plan = account_plan(config, exc.account, use_default_source=True)
+                    task, path = create_browser_task(config, plan, args, scope="batch", selected=set(args.account or config.handles))
+                    _print(pending_result(task, path))
+                return 4
     return 0
 
 
@@ -199,6 +290,9 @@ def main(argv=None):
     try:
         return run(args)
     except MonitorError as exc:
+        if getattr(exc, "code", None) == "NEEDS_TRANSLATION":
+            _print(exc.result)
+            return 5
         print("ERROR: " + str(exc), file=sys.stderr)
         return 2
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):

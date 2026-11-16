@@ -4,7 +4,7 @@
 
 双击仓库根目录的`run_daily.cmd`。本机`runtime.local.cmd`已设置现有Python/Node运行环境，`config.local.json`和`request-specs/*.local.json`已配置三个监测账号。这些文件被Git忽略。
 
-正常流程是HTTP分页采集、完整性校验、提交SQLite，再导出CSV、JSON及离线网页。不调用大模型，不需要让模型逐页看页面。退出码0才表示本次流水线完成；失败不会拿旧数据当今天。
+正常流程是HTTP分页采集、完整性校验、提交SQLite，再导出CSV、JSON及离线网页。数字采集不调用大模型，不需要让模型逐页看页面。默认中文交付另检查剧名和简介，缺失时返回翻译任务和退出码5，由Codex补译、导入再继续导出；无需重新采集。退出码0才表示本次流水线完成；失败不会拿旧数据当今天。
 
 报表位于`_local/state/reports/北京时间日期/frontend/monitor.html`，可离线双击查看。可追加`--xlsx`导出三个Excel。Excel导出失败时，采集及已有报表仍保存，可单独运行`export-xlsx`重做，不必再抓数据。
 
@@ -16,9 +16,11 @@
 
 ## 请求失效或网络失败
 
+新的单账号接入可使用 `onboard`，正常配置直接复用；需要Chrome时返回私有manifest和退出码4，浏览器端准备完成后 `onboard --resume` 继续。详细命令见[接入与恢复说明](onboarding.md)。原入口不自动扩大监测范围。需要原三账号整批准备恢复任务时可显式使用 `run_daily.cmd --recover-request`。
+
 1. 先用`python -m tkmonitor --config config.local.json status`查看最近尝试。`failed`不等于有效快照。
 2. 网络错误有有限重试；排查本机网络后可以重跑。401/403或验证HTML则恢复正常浏览器会话，不重复轰炸接口。
-3. 使用`integrations/chrome_capture.mjs`中的`refreshRequestSpec`观察正常分页请求，更新对应私有配置。模块不读取Cookie/Authorization、不生成平台签名。
+3. 推荐按返回的manifest调用`integrations/chrome_capture.mjs`中的`captureOnboarding`，在用户Chrome临时页中提前监听正常首屏请求；再用`onboard --resume`验证并恢复。模块不读取Cookie/Authorization头、不生成签名、不固定滚动。没有浏览器通道时明确保留待办，不假报完成。
 4. 再运行一键入口。新的有效记录只会追加；旧快照和初始值不重置。
 
 ## 统计口径
@@ -31,7 +33,7 @@
 
 ## 资料和备份
 
-已有封面和中文资料按ID保留。新剧及无法确认原文未变化的旧译文会提示待翻译/待核对，原始英文留存。新图像URL保留但下载补图是单独步骤。整剧发布时间未知时留空，关联视频日期不冒充上线日期。
+已有封面和中文资料按账号、ID及确切原文复用。新剧及原文变化的剧目进入增量补译，原始英文留存；缺中文不能作为完整报表交付。按[中文资料交付说明](translations.md)补译后重做导出即可。明确只需数字或原文时可使用`--allow-untranslated`。新图像URL保留但下载补图是单独步骤。整剧发布时间未知时留空，关联视频日期不冒充上线日期。
 
 `legacy/v1`及版本标签保留旧方法。完整旧资料ZIP在本机`_local/`中。定期在程序未写入时备份`_local/state/`；公共GitHub只保存源码、文档和脱敏测试数据。
 

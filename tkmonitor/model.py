@@ -17,6 +17,15 @@ class MonitorError(Exception):
     """An actionable, safe-to-print error; never include private request data."""
 
 
+class SourceError(MonitorError):
+    """A classified source failure, without exposing the request or raw exception."""
+
+    def __init__(self, message, code, account=None):
+        super().__init__(message)
+        self.code = code
+        self.account = account
+
+
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

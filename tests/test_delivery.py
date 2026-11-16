@@ -24,6 +24,9 @@ def saved_book(path, config, changes=None, images=None):
     values = {}
     for number, row in enumerate(config["rows"], 8):
         values.update({"X" + str(number): row["id"], "D" + str(number): row["title"]})
+        values.update({"C" + str(number): row.get("title_zh") or "中文名待补",
+                       "V" + str(number): row.get("description_zh") or row.get("description_en") or "简介待补",
+                       "W" + str(number): row.get("genre") or "题材待补"})
         values.update({col + str(number): row.get(field) for col, field in FIELDS.items()})
     values.update({col + str(len(config["rows"]) + 8): config["summary"][field] for col, field in TOTALS.items()})
     values.update(changes or {})
@@ -59,7 +62,7 @@ class SavedWorkbookTests(LocalCase):
         path = self.root / "saved.xlsx"
         saved_book(path, config)
         self.assertTrue(verify_workbook(path, config)["formula_values_verified"])
-        for changes in ({"X8": int(ONE)}, {"H8": 11}, {"I9": .11}, {"F8": None}):
+        for changes in ({"X8": int(ONE)}, {"H8": 11}, {"I9": .11}, {"F8": None}, {"C8": "错误中文名"}, {"V8": "错误简介"}):
             with self.subTest(changes=changes):
                 saved_book(path, config, changes)
                 with self.assertRaisesRegex(MonitorError, "mismatch"):

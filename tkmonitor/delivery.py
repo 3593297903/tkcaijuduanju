@@ -71,6 +71,9 @@ def verify_workbook(path, config):
             for number, row in enumerate(config["rows"], 8):
                 check("X" + str(number), row["id"])
                 check("D" + str(number), row["title"])
+                check("C" + str(number), row.get("title_zh") or "中文名待补")
+                check("V" + str(number), row.get("description_zh") or row.get("description_en") or "简介待补")
+                check("W" + str(number), row.get("genre") or "题材待补")
                 for column, field in FIELDS.items():
                     check(column + str(number), row.get(field))
             total = len(config["rows"]) + 8
@@ -80,7 +83,7 @@ def verify_workbook(path, config):
             if image_count != sum(bool(row.get("image")) for row in config["rows"]):
                 raise MonitorError("Saved workbook image count differs from the report.")
         return {"account": config["name"], "rows": len(config["rows"]), "images": image_count,
-                "file": Path(path).name, "formula_values_verified": True}
+                "file": Path(path).name, "formula_values_verified": True, "chinese_text_verified": True}
     except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError, IndexError, ValueError, TypeError) as exc:
         raise MonitorError("Cannot verify the saved XLSX structure; valid collection data is preserved.") from exc
 

@@ -1,6 +1,6 @@
 # 短剧采集与监测
 
-`tkmonitor` 的采集、SQLite 历史、指标计算和 CSV／JSON／HTML 报表仅依赖 Python 标准库。完整日报的封面校验与转换另需可选的 Pillow，Excel 导出另需 Node 表格引擎。核心不调用大模型，不翻译或编写剧情。新增资料或发生变化的原文需要翻译时，报表明确显示“待翻译／待补充”。
+`tkmonitor` 的采集、SQLite 历史、指标计算和 CSV／JSON／HTML 报表仅依赖 Python 标准库。完整日报的封面校验与转换另需可选的 Pillow，Excel 导出另需 Node 表格引擎。默认交付要求中文剧名和中文简介齐全；缺失或原文变化时生成增量翻译任务，由 Codex 或明确指定的翻译提供方补译、导入后继续交付。Python 采集器自身不调用大模型，也不编写剧情。
 
 `legacy/v1/` 保留旧方法的只读归档；`legacy/v1/manifest.json` 记录原文件 SHA-256。原始业务数据、浏览器资料、Cookie、签名请求、SQLite 和报表只保存在被 Git 忽略的本机目录中。`config.example.json` 与测试数据可公开；`config.local.json`、`request-specs/` 和 `_local/` 不提交。
 
@@ -66,6 +66,22 @@ python -X utf8 -m tkmonitor --config config.local.json collect --account epiccre
 
 同一批选择的账号全部验证通过后才事务提交。报表或 XLSX 在提交之后单独执行，导出失败不会回滚有效采集。缺少部分账号，或所选指标当日完全没有已知值时，报表会明确标注并返回退出码3；有效采集仍保留。`status` 中的 `recent_attempts` 区分 `running`、`failed`、`valid`。
 
+## 新账号接入与请求恢复
+
+新增 `onboard` 入口，已有配置直接复用原HTTP采集，没有配置时返回 `NEEDS_BROWSER` 和私有manifest（退出码4），由已授权的Codex Chrome运行时捕获正常首屏请求，再恢复全量采集：
+
+```powershell
+python -X utf8 -m tkmonitor --config config.local.json onboard --url https://www.tiktok.com/@ACCOUNT --name DISPLAY_NAME --dry-run
+python -X utf8 -m tkmonitor --config config.local.json onboard --url https://www.tiktok.com/@ACCOUNT --name DISPLAY_NAME --report --metric frontend --finalize --xlsx
+python -X utf8 -m tkmonitor --config config.local.json onboard --resume '_local/onboarding/实际任务ID.local.json'
+```
+
+默认保留用户原标签页，不刷新、不固定滚动；首屏不发目标请求时明确返回未完成。只有显式 `--allow-scroll-fallback` 才允许一次备用滚动。普通终端不能自行取得用户Chrome连接。单账号配置和报告独立，默认三账号名单不变。
+
+Windows 可使用 `run_onboard.cmd` 自动读取同一份本机运行时配置，例如 `run_onboard.cmd --url https://www.tiktok.com/@ACCOUNT --name DISPLAY_NAME --report --finalize --xlsx`；恢复时只传 `--resume` 和实际manifest路径。
+
+原 `collect` 默认行为不变；显式 `--recover-request` 可在401/403时准备一次整批恢复任务，保持全部选中账号校验后统一提交。网络、限流、字段变化等错误不反复打开Chrome。详细操作和边界见[接入与恢复说明](docs/onboarding.md)。
+
 ## 浏览器与 checkpoint 接口
 
 Chrome 辅助采集由独立集成运行，读取用户已授权页面的原始响应，不依赖核心内置浏览器库。可将账号的 `source` 配置为：
@@ -130,7 +146,9 @@ python -X utf8 -m tkmonitor --config config.local.json collect --finalize --xlsx
 
 封面只使用采集时保存的页面缩略图 URL，保留 HTTPS/TLS 校验、TikTok CDN 域名限制、同主机跳转限制、8 MB 大小限制和图片解码检查。优先复用本机已有图片；需要下载时最多四个并发、每张最多三次请求，每次超时十二秒。签名 URL 和原始错误消息不进入完成日志；图片转为 Excel 可用的 PNG。该图片下载器与已验证的日常方法一致，不采用 shell 中的代理环境变量。
 
-中文简介首先使用数据库中随对应英文原文保存的译文。原文变化后旧译文失效；可以从不晚于所选日期的已有日报继承同账号、ID、英文剧名对应的中文参考资料，但始终标注“历史参考，未核对本次英文原文”，不作为已核对译文写回数据库。没有中文资料时保留本次英文原文并标记待翻译。不会自动生成中文剧情。
+中文资料按账号、剧目 ID 和确切原文复用；英文剧名或简介变化后，对应旧译文失效。默认 `report`、带报告的采集、`finalize`、`export-xlsx` 和 `package` 在缺中文时返回 `NEEDS_TRANSLATION`（退出码 5），不把“待翻译”当作完整交付。有效采集、播放量、初始值和统计时间仍然保留。只需要数字或英文原文时，才显式追加 `--allow-untranslated`。历史中文参考不算本次原文已核对的翻译。
+
+补译流程见 [中文资料交付说明](docs/translations.md)。采集命令遇到退出码 5 后，Codex 应读取返回的私有任务，忠实翻译每条原文并导入，再继续导出；不要为补译重新采集。普通终端没有独立的 AI 翻译服务时，需要有人或外部提供方填好任务，不能声称已自动完成翻译。
 
 `--finalize` 核查账号和整数覆盖、每条封面、英文简介、所有数值和快照指纹，输出 `media_validation.json`。数值或封面、原文不齐时返回非零，保留可检查的报表与已提交的采集数据。暂时无法联网下载图片、或只需重做 Excel 时，可单独重跑，不会新增一次采集：
 
@@ -156,7 +174,7 @@ python -X utf8 -m tkmonitor --config config.local.json package --day YYYY-MM-DD 
 schtasks /Create /TN "TikTokDramaMonitor" /SC DAILY /ST 16:30 /TR "C:\path\to\tkcaijuduanju\run_daily.cmd" /IT
 ```
 
-任务使用系统环境或`runtime.local.cmd`中的 Python/Node 设置，临时 PowerShell 环境变量不会自动传给未来的计划任务。退出码：`0` 完成，`2` 配置／采集／导出失败，`3` 报告缺少部分账号或所选指标全部缺失，`130` 用户中断。失败信息提供操作方向，不打印请求参数、Cookie 或授权头。
+任务使用系统环境或`runtime.local.cmd`中的 Python/Node 设置，临时 PowerShell 环境变量不会自动传给未来的计划任务。退出码：`0` 完成，`2` 配置／采集／导出失败，`3` 报告缺少部分账号或所选指标全部缺失，`4` 接入或恢复需要已授权浏览器动作，`5` 中文待补译、有效采集已保留，`130` 用户中断。失败信息提供操作方向，不打印请求参数、Cookie 或授权头。
 
 ## 验证
 

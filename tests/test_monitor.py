@@ -591,8 +591,13 @@ class HttpTests(LocalCase):
 class CheckpointAndCliTests(LocalCase):
     def cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
+        # These legacy cases exercise numeric/raw exports. The Chinese-default
+        # delivery contract has its own end-to-end tests in test_translations.
+        options = list(args)
+        if args[0] == "report" or args[0] == "collect" and any(x in args for x in ("--report", "--xlsx", "--finalize", "--delivery")):
+            options.append("--allow-untranslated")
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            result = main(["--config", str(self.config_path), *args])
+            result = main(["--config", str(self.config_path), *options])
         return result, out.getvalue(), err.getvalue()
 
     def source_config(self, accounts):

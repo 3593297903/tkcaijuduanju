@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl, quote, unquote_plus, urlsplit, urlunsplit, u
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from .config import read_json
-from .model import (ID_PATTERN, MonitorError, Record, Snapshot, iso_time, now_utc, parse_display,
+from .model import (ID_PATTERN, MonitorError, SourceError, Record, Snapshot, iso_time, now_utc, parse_display,
                     parse_time, validate_snapshot)
 
 
@@ -159,7 +159,7 @@ def _page(value, fields=None, *, allow_empty_drama_list=False):
     if "status" in fields:
         statuses.append(_field(value, fields["status"]))
     if any(status not in (0, "0") or isinstance(status, bool) for status in statuses):
-        raise MonitorError("TikTok returned an API error; refresh the authorized browser session and private request specification.")
+        raise SourceError("TikTok returned an API error; inspect the saved response before updating the private request specification.", "API_ERROR")
     has_more = _field(value, fields.get("has_more", "hasMore"))
     items_field = fields.get("items", "dramaList")
     if (allow_empty_drama_list and items_field == "dramaList"
@@ -275,7 +275,7 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
                 response = transport(request_url, headers, timeout)
             except (TimeoutError, socket.timeout, URLError, ConnectionError, OSError) as exc:
                 if attempt == retries:
-                    raise MonitorError("HTTP request timed out or failed after bounded retries; check network access and retry collection.") from exc
+                    raise SourceError("HTTP request timed out or failed after bounded retries; check network access and retry collection.", "NETWORK_ERROR", account) from exc
                 sleep(min(backoff, 2 ** attempt))
                 continue
             if validate_url(response.url) != host:
@@ -285,22 +285,22 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(response.body)
             if response.status in (401, 403):
-                raise MonitorError("TikTok authentication failed (401/403); refresh the authorized browser session and private request specification.")
+                raise SourceError("TikTok authentication failed (401/403); refresh the authorized browser session and private request specification.", "AUTH_REQUIRED", account)
             if response.status == 429 or 500 <= response.status <= 599:
                 if attempt == retries:
-                    raise MonitorError("TikTok rate limit or server failure persisted after bounded retries; try again later.")
+                    raise SourceError("TikTok rate limit or server failure persisted after bounded retries; try again later.", "RATE_LIMIT" if response.status == 429 else "SERVER_ERROR", account)
                 sleep(_retry_delay(response.headers, attempt, backoff))
                 continue
             if not 200 <= response.status <= 299:
-                raise MonitorError("TikTok returned an unsuccessful HTTP status; inspect the private request specification.")
+                raise SourceError("TikTok returned an unsuccessful HTTP status; inspect the private request specification.", "HTTP_ERROR", account)
             break
         content_type = next((value for key, value in response.headers.items() if key.lower() == "content-type"), "")
         if "application/json" not in content_type.lower() and "+json" not in content_type.lower():
-            raise MonitorError("TikTok returned non-JSON content, possibly a login or verification page; open the authorized browser session.")
+            raise SourceError("TikTok returned non-JSON content, possibly a login or verification page; inspect the saved response.", "NON_JSON", account)
         try:
             value = json.loads(response.body)
         except (json.JSONDecodeError, UnicodeError) as exc:
-            raise MonitorError("TikTok response is not valid JSON; check login or verification in the browser.") from exc
+            raise SourceError("TikTok response is not valid JSON; check login or verification in the browser.", "INVALID_JSON", account) from exc
         # This endpoint may send a separate empty terminal page after a full page.
         # The offset check below requires that such a page consumes no slots.
         items, has_more, following = _page(
