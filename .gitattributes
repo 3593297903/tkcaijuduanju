@@ -1,3 +1,4 @@
 * text=auto
 legacy/v1/** -text
 *.cmd text eol=crlf
+*.sh text eol=lf

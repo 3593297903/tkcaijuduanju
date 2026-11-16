@@ -6,6 +6,8 @@
 
 ## 快速开始
 
+新设备上的 Codex 请先完整执行[Windows／macOS 新设备安装、迁移与验收指令](docs/new-device-codex.md)。该指令会识别本机环境、复用或安装依赖、保留历史并完成实际验收；目标设备通过验收前，不视为该设备已适配。
+
 需要 Python 3.11 或更新版本。安装核心无需 `pip`。在仓库目录运行：
 
 ```powershell
@@ -167,6 +169,8 @@ python -X utf8 -m tkmonitor --config config.local.json package --day YYYY-MM-DD 
 ## Windows 每日入口与可选计划任务
 
 `run_daily.cmd` 从自身目录执行 `collect --report --metric frontend --finalize --xlsx`，包括上述完整日报收尾，不写死 Codex 或 Python 安装路径。若存在本机私有的`runtime.local.cmd`，先加载其中环境设置。可通过 `TKMONITOR_PYTHON` 指定 Python，通过 `TKMONITOR_CONFIG` 指定配置；默认分别为 `python`、仓库中的 `config.local.json`。完整入口需要 Pillow 和 Node 表格引擎；只采集数字或只采单个账号时使用上面的独立 `collect` 命令。可以追加 `--day`、`--delivery` 等选项。`runtime.local.cmd`已被Git忽略，本机路径不会进入公共仓库。
+
+macOS 使用 `sh ./run_daily.sh`、`sh ./run_onboard.sh --url https://www.tiktok.com/@ACCOUNT`。两个入口读取项目内的私有 `runtime.local.sh`；未指定 Python 时优先使用项目 `.venv/bin/python`，否则使用 `python3`。入口会转交全部参数和退出码。跨设备应重新发现运行时及 Chrome 能力，不能复制 Windows 的虚拟环境或二进制到 Mac 后宣称可用。
 
 先完成一次真正在线采集并检查报告，再按需安装任务。下面只是手动可选命令，仓库不会自行安装计划任务。浏览器模式需要对应用户已登录且浏览器辅助通道可用：
 
