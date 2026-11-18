@@ -1,5 +1,7 @@
 # 短剧采集与监测
 
+当前稳定版为 `v0.2.0`。使用 `python -m tkmonitor --version` 查看本机版本。新设备可以从 [GitHub Release](https://github.com/3593297903/tkcaijuduanju/releases/tag/v0.2.0) 获取固定版本，具体内容见[版本记录](CHANGELOG.md)。
+
 `tkmonitor` 的采集、SQLite 历史、指标计算和 CSV／JSON／HTML 报表仅依赖 Python 标准库。完整日报的封面校验与转换另需可选的 Pillow，Excel 导出另需 Node 表格引擎。默认交付要求中文剧名和中文简介齐全；缺失或原文变化时生成增量翻译任务，由 Codex 或明确指定的翻译提供方补译、导入后继续交付。Python 采集器自身不调用大模型，也不编写剧情。
 
 `legacy/v1/` 保留旧方法的只读归档；`legacy/v1/manifest.json` 记录原文件 SHA-256。原始业务数据、浏览器资料、Cookie、签名请求、SQLite 和报表只保存在被 Git 忽略的本机目录中。`config.example.json` 与测试数据可公开；`config.local.json`、`request-specs/` 和 `_local/` 不提交。

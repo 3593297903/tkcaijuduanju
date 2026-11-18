@@ -11,6 +11,7 @@ import shutil
 from contextlib import contextmanager
 import uuid
 
+from . import __version__
 from .analysis import build_report
 from .config import load_config
 from .delivery import package_report, verify_workbook, workbook_name
@@ -32,6 +33,7 @@ def _report_status(report):
 
 def parser():
     result = argparse.ArgumentParser(description="Local Short Drama Monitor (Asia/Shanghai)")
+    result.add_argument("--version", action="version", version=f"tkmonitor {__version__}")
     result.add_argument("--config", default="config.local.json", help="Portable local config path")
     commands = result.add_subparsers(dest="command", required=True)
     migrate = commands.add_parser("import-history", help="Import original local history atomically and idempotently")
