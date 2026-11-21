@@ -4,7 +4,7 @@ import path from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
 
 const API='/api/drama/user/drama_list/';
-const METHODS=['Network.requestWillBeSent','Network.responseReceived','Network.loadingFinished','Network.loadingFailed'];
+export const NETWORK_METHODS=['Network.requestWillBeSent','Network.responseReceived','Network.loadingFinished','Network.loadingFailed'];
 const HEADERS=new Set(['accept','accept-language','referer','user-agent']);
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 export class CaptureError extends Error {
@@ -26,7 +26,7 @@ function profileUrl(account){
   return 'https://www.tiktok.com/@'+account;
 }
 
-function requestInfo(request){
+export function requestInfo(request){
   try{
     const url=new URL(request.url);
     if(url.origin!=='https://www.tiktok.com'||url.pathname!==API||url.hash||url.username||url.password
@@ -56,14 +56,16 @@ export function identityFromHtml(html,account){
   return null;
 }
 
-export function validateDramaResponse(value,cursor){
+export function validateDramaResponse(value,cursor,{allowReferencesOnly=false,allowEmptyTerminal=false}={}){
   if(!value||typeof value!=='object'||Array.isArray(value))throw new CaptureError('RESPONSE_INVALID','Expected a drama response object.');
-  if(['status_code','statusCode'].filter(k=>k in value).some(k=>value[k]!==0&&value[k]!=='0'))throw new CaptureError('API_ERROR','The captured request returned a business error.');
-  if(!Array.isArray(value.dramaList)||typeof value.hasMore!=='boolean'
+  const statusFields=['status_code','statusCode'].filter(key=>key in value);
+  if(statusFields.some(key=>value[key]!==0&&value[key]!=='0'))throw new CaptureError('API_ERROR','The captured request returned a business error.');
+  const items=allowEmptyTerminal&&value.hasMore===false&&statusFields.length&&!Object.hasOwn(value,'dramaList')?[]:value.dramaList;
+  if(!Array.isArray(items)||typeof value.hasMore!=='boolean'
       ||!(typeof value.cursor==='string'&&/^\d+$/.test(value.cursor)||typeof value.cursor==='number'&&Number.isSafeInteger(value.cursor)&&value.cursor>=0)
-      ||BigInt(value.cursor)!==BigInt(cursor)+BigInt(value.dramaList.length))throw new CaptureError('RESPONSE_INVALID','The captured response has invalid pagination.');
+      ||BigInt(value.cursor)!==BigInt(cursor)+BigInt(items.length)||!items.length&&value.hasMore)throw new CaptureError('RESPONSE_INVALID','The captured response has invalid pagination.');
   const seen=new Set();let complete=0;
-  for(const item of value.dramaList){
+  for(const item of items){
     if(!item||typeof item!=='object'||typeof item.dramaID!=='string'||!/^\d{19}$/.test(item.dramaID))throw new CaptureError('RESPONSE_INVALID','The captured response has invalid drama IDs.');
     if(Object.keys(item).length===1)continue;
     const count=item.numWatched;
@@ -72,12 +74,12 @@ export function validateDramaResponse(value,cursor){
         ||BigInt(count)>9223372036854775807n)throw new CaptureError('RESPONSE_INVALID','The captured response has invalid drama titles or precise counts.');
     seen.add(item.dramaID);complete++;
   }
-  if(!complete)throw new CaptureError('RESPONSE_INVALID','No complete dramas were returned by the captured request.');
-  return {records:complete,raw_slots:value.dramaList.length};
+  if(!complete&&!(allowReferencesOnly&&items.length||allowEmptyTerminal&&value.hasMore===false&&!items.length))throw new CaptureError('RESPONSE_INVALID','No complete dramas were returned by the captured request.');
+  return {records:complete,raw_slots:items.length};
 }
 
-async function responseBody(cdp,requestId){
-  const result=await cdp.send('Network.getResponseBody',{requestId});
+export async function responseBody(cdp,requestId,timeoutMs){
+  const result=await cdp.send('Network.getResponseBody',{requestId},timeoutMs?{timeoutMs}:undefined);
   if(typeof result?.body!=='string')throw new CaptureError('RESPONSE_UNAVAILABLE','The recorded response body is unavailable.');
   const body=result.base64Encoded?Buffer.from(result.body,'base64').toString('utf8'):result.body;
   if(Buffer.byteLength(body)>25*1024*1024)throw new CaptureError('RESPONSE_INVALID','The recorded response exceeds the size limit.');
@@ -110,15 +112,16 @@ async function visibleAccount(tab,account){
 
 /** navigate=true is restricted to a caller-owned temporary page. */
 export async function captureRequestSpec({tab,account,output,evidencePath,responsePath,taskId=null,navigate=false,
-  allowScrollFallback=false,timeoutMs=90000,maxPages=100,initialEvents=[],clock=()=>Date.now(),onScroll=()=>{}}){
+  allowScrollFallback=false,timeoutMs=90000,maxPages=100,initialEvents=[],clock=()=>Date.now(),onScroll=()=>{},
+  initialPageOnly=false,onVerified=null}){
   const target=profileUrl(account);
-  if(!output?.endsWith('.local.json'))throw new CaptureError('PRIVATE_OUTPUT','Private request output must end in .local.json.');
+  if(!output?.endsWith('.local.json')&&(output!==undefined||typeof onVerified!=='function'))throw new CaptureError('PRIVATE_OUTPUT','Private request output must end in .local.json.');
   if(!navigate&&(await tab.url())!==target)throw new CaptureError('TARGET_MISMATCH','Use a target account tab or a caller-owned temporary tab.');
   if(!Number.isFinite(timeoutMs)||timeoutMs<100||timeoutMs>300000)throw new CaptureError('BUDGET_INVALID','Invalid browser capture budget.');
   const started=clock(),deadline=started+timeoutMs;
   const cdp=await tab.capabilities.get('cdp');
   await cdp.send('Network.enable');
-  const first=await cdp.readEvents({methods:METHODS,limit:1000});
+  const first=await cdp.readEvents({methods:NETWORK_METHODS,limit:1000});
   let cursor=first.cursor,identity=null,clicked=false,scrolls=0,visible=false,domChecked=false,lastDomCheck=0;
   let events=[...initialEvents];
   const pending=new Map(),readBodies=new Set();
@@ -140,12 +143,13 @@ export async function captureRequestSpec({tab,account,output,evidencePath,respon
         if(url.origin!=='https://www.tiktok.com')continue;
         const info=requestInfo(entry.request),profileDocument=url.pathname==='/@'+account,profileResponse=url.pathname==='/api/user/detail/';
         if(!info&&!profileDocument&&!profileResponse)continue;
+        if(info&&entry.response.url&&entry.response.url!==entry.request.url){readBodies.add(id);continue;}
         let body;try{body=entry.body??await responseBody(cdp,id);}catch{readBodies.add(id);continue;}
         if(profileDocument){identity=identityFromHtml(body,account)??identity;readBodies.add(id);continue;}
         if(profileResponse){try{identity=profileIdentity(JSON.parse(body),account)??identity;}catch{}readBodies.add(id);continue;}
         entry.body=body;
         if(!identity)continue;
-        if(info.secUid!==identity.secUid){readBodies.add(id);continue;}
+        if(info.secUid!==identity.secUid||initialPageOnly&&BigInt(info.cursor)!==0n){readBodies.add(id);continue;}
         if(entry.response.status!==200)throw new CaptureError('HTTP_REJECTED','The target drama request was not successful.');
         const contentType=entry.response.mimeType??Object.entries(entry.response.headers??{}).find(([k])=>k.toLowerCase()==='content-type')?.[1]??'';
         if(!/application\/json|\+json/i.test(contentType))throw new CaptureError('NON_JSON','The target drama response is not JSON.');
@@ -154,7 +158,7 @@ export async function captureRequestSpec({tab,account,output,evidencePath,respon
         visible=await visibleAccount(tab,account);if(!visible)continue;
         const headers=Object.fromEntries(Object.entries(entry.request.headers??{}).filter(([k,v])=>HEADERS.has(k.toLowerCase())&&typeof v==='string'&&!/[\r\n]/.test(v)));
         const spec={url:entry.request.url,headers,initial_cursor:'0',cursor_param:'cursor',max_pages:maxPages,timeout_seconds:20,retries:1};
-        const captured=new Date().toISOString(),specHash=await atomicJson(output,spec);
+        const captured=new Date().toISOString(),specHash=output?await atomicJson(output,spec):null;
         let responseHash=null;
         if(responsePath){
           if(!responsePath.endsWith('.local.json'))throw new CaptureError('PRIVATE_OUTPUT','Response output must be private.');
@@ -168,7 +172,8 @@ export async function captureRequestSpec({tab,account,output,evidencePath,respon
           user_page_refreshes:0,temporary_tabs:navigate?1:0,duration_ms:clock()-started,
           request_spec_sha256:specHash,response_sha256:responseHash,...counts};
         if(evidencePath)await atomicJson(evidencePath,evidence);
-        return {account,request_spec_saved:true,captured_at:captured,capture_source:evidence.capture_source,
+        if(onVerified)await onVerified({tab,cdp,eventCursor:cursor,events,body,evidence,requestedCursor:info.cursor});
+        return {account,request_spec_saved:Boolean(output),captured_at:captured,capture_source:evidence.capture_source,
           scroll_count:scrolls,user_page_refreshes:0,records:counts.records,duration_ms:evidence.duration_ms};
       }
       if(clock()-lastDomCheck>=400||!domChecked){
@@ -177,8 +182,10 @@ export async function captureRequestSpec({tab,account,output,evidencePath,respon
         if(visible&&!clicked){
           try{
             const dramas=tab.playwright.getByRole('tab',{name:'Short dramas',exact:true});
-            if(await dramas.isVisible()&&await dramas.getAttribute('aria-selected')!=='true')await dramas.click({timeout:3000});
-            clicked=true;
+            if(await dramas.isVisible()){
+              if(await dramas.getAttribute('aria-selected')!=='true')await dramas.click({timeout:3000});
+              clicked=true;
+            }
           }catch{}
         }
         lastDomCheck=clock();
@@ -186,7 +193,7 @@ export async function captureRequestSpec({tab,account,output,evidencePath,respon
       if(allowScrollFallback&&scrolls===0&&visible&&clock()-started>=Math.min(timeoutMs/2,5000)){
         await cdp.send('Input.dispatchMouseEvent',{type:'mouseWheel',x:100,y:500,deltaX:0,deltaY:900});scrolls++;onScroll();
       }
-      const page=await cdp.readEvents({methods:METHODS,afterSequence:cursor,limit:1000,timeoutMs:Math.max(1,Math.min(500,deadline-clock()))});
+      const page=await cdp.readEvents({methods:NETWORK_METHODS,afterSequence:cursor,limit:1000,timeoutMs:Math.max(1,Math.min(500,deadline-clock()))});
       cursor=page.cursor;
       if(page.truncated)throw new CaptureError('EVENTS_INCOMPLETE','Required browser event history was truncated; no request was activated.');
       events=page.events;

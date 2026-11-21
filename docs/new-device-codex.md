@@ -10,14 +10,14 @@
 
 ## 一、目标与授权范围
 
-本任务允许你在当前项目目录安装所需项目依赖，检查并在缺失时安装官方 Git、Python、Node、Chrome，连接用户自己的 Chrome，采集当前北京时间日期的数据，补齐中文并生成报告。已有合适环境优先复用，减少重复安装。需要管理员权限、登录或浏览器工具授权时，按当前平台的真实权限流程处理。
+本任务允许你在当前项目目录安装所需项目依赖，检查并在缺失时安装官方 Git、Python、Node、Chrome，连接用户自己的 Chrome，采集当前北京时间日期的数据并生成原文报告。已有合适环境优先复用，减少重复安装。需要管理员权限、登录或浏览器工具授权时，按当前平台的真实权限流程处理。
 
 保持以下项目规则：
 
 - 正式采集沿用 Python `urllib` 请求正常授权的 JSON 接口、游标分页、19位字符串 ID、整数和完整性校验。不要替换成逐剧截图识别、Scrapling、抓视频文件或新建一套采集器。
 - 默认监测范围仅为 Epic Creation `epiccreation111`、VerveDrama `vervedramaeg`、Baby Drama-ca `babydrama_ca`。其他已有账号配置继续保留，单独使用，不自动加入默认批次。
 - 保留原全部历史、初始值、中文资料和封面；未知的昨天数据保持空值。发布时间只能使用真实来源字段，不能由 ID 或初见日期推算。
-- 中文名和中文简介默认补齐；已有且原文一致的译文复用，只补译新增或原文变化项。中文名为参考译名，不冒充官方译名。
+- 原文报表直接使用平台剧名和简介。用户明确要中文版时再用 `--translate`，复用原文一致的旧译文并按需补译。
 - 请求文件、私有配置、数据库、报表、迁移包、环境变量和浏览器凭据只放本机被 Git 忽略的位置。不要输出签名 URL、Cookie、Authorization 或读取无关服务的密钥。
 - 优先使用自己创建的临时 Chrome 页面，保留用户原标签页，默认不刷新用户页面、不滚动；不得全局关闭 TLS 校验、关闭浏览器安全设置或覆盖用户 Chrome 资料目录。
 - 不修改 `legacy/v1/`，不重置 Git 历史、不覆盖未提交工作、不主动安装定时任务。仅为当前设备部署所需的配置和小范围兼容修复可以继续完成；修改采集口径或新增翻译收费服务不在本次范围。
@@ -35,7 +35,7 @@ git clone --branch feature/reusable-monitor --single-branch https://github.com/3
 ```
 
 6. 已有目录时先检查 `git status`、分支和 remote。干净且指向本仓库的正确分支才 `git fetch origin`、`git pull --ff-only`；有未提交内容或其他项目时，保留原目录，另建独立目录再克隆。不要直接覆盖本机配置。
-7. 记录实际 `git rev-parse HEAD`；检查包含中文补译命令和 `run_daily.sh`／`run_onboard.sh`。可以用 `git merge-base --is-ancestor 25aca3c7a0b432a4478806456f0f920587d6b18e HEAD` 确认功能基线，不能只靠日期判断版本。
+7. 记录实际 `git rev-parse HEAD`，检查 `run_daily.sh`／`run_onboard.sh` 和 `collect --help` 中的原文默认及 `--translate` 选项。可以用 `git merge-base --is-ancestor 25aca3c7a0b432a4478806456f0f920587d6b18e HEAD` 核对跨平台入口的历史基线。
 
 ## 三、环境检查、缺失安装与持久化
 
@@ -174,7 +174,7 @@ PY -X utf8 -m tkmonitor --config config.local.json onboard --url https://www.tik
 PY -X utf8 -m tkmonitor --config config.local.json onboard --url https://www.tiktok.com/@babydrama_ca
 ```
 
-逐个完成当前账号的捕获／恢复后再进入下一个。单账号任务配置应共享正确的原 `state_dir`；先核对再采集。三个账号有效快照都已保存到共享库后，直接进入补译与总报告生成，**不为了导出再重新采集一遍**。
+先核对单账号配置是否共享正确的 `state_dir`，再逐个完成捕获和恢复。三个账号的有效快照都保存到共享库后，直接生成总报告。
 
 ### 6.2 处理需要浏览器的任务
 
@@ -193,24 +193,9 @@ PY -X utf8 -m tkmonitor --config config.local.json onboard --resume ACTUAL_MANIF
 
 若 Codex 只能控制原生 UI、没有捕获模块所需的浏览器／CDP 工具，则记录 `BROWSER_UNAVAILABLE`，继续其他独立工作，明确首次接入尚未通过。不要把 Windows 上的成功证据当成 Mac 当前设备的成功。
 
-## 七、默认补译与完整交付
+## 七、原文报表与完整交付
 
-退出码5／`NEEDS_TRANSLATION` 表示数字已保存、中文仍需补齐，**不是让你停在英文“待翻译”报告**。完整读取返回的 `.local.json` 任务，按20～30条或适合当前上下文的批次忠实翻译保存的英文剧名和原始简介，可补中文题材归纳。
-
-- 不改账号、ID、observed_at、英文原文或 `source_hash`。
-- 保留人物性别、关系、能力、冲突和结局，不仅凭剧名猜剧情，不把较长简介擅自删成一句。
-- 已有原文一致的中文复用。原始英文简介缺失时，先尝试补原始资料，无法取得则明确缺失，不能编剧情通过检查。
-- 翻译由当前 Codex 完成，不要求用户另配 API Key；纯独立定时命令目前没有后台 AI 翻译服务。
-- 不使用 `--allow-untranslated` 绕过本次完整中文交付。只有用户明确只要播放量或原文时才使用该选项。
-
-需要手动生成任务时：
-
-```text
-PY -X utf8 -m tkmonitor --config config.local.json translation-tasks --day ACTUAL_BEIJING_DAY --metric frontend
-PY -X utf8 -m tkmonitor --config config.local.json import-translations --input ACTUAL_COMPLETED_TASK.local.json
-```
-
-对于带导出选项的 onboarding／恢复任务，导入后再次 `onboard --resume`，复用已提交快照继续导出。对于普通采集或逐个账号接入后的总表，使用原采集日期：
+正常交付直接使用原始剧名和简介。整批采集已生成并核验全套报表时，可以直接交付。逐个账号接入后要生成总报告，或需要重做交付时，按原采集日期运行以下命令。
 
 ```text
 PY -X utf8 -m tkmonitor --config config.local.json finalize --day ACTUAL_BEIJING_DAY --metric frontend
@@ -218,9 +203,9 @@ PY -X utf8 -m tkmonitor --config config.local.json export-xlsx --day ACTUAL_BEIJ
 PY -X utf8 -m tkmonitor --config config.local.json package --day ACTUAL_BEIJING_DAY --metric frontend --output _local/deliveries/ACTUAL_BEIJING_DAY
 ```
 
-本次统计日按北京时间确定，与电脑当地时区无关。跨北京时间零点时重新检查各账号日期覆盖，不把昨日快照改名为今天。导入翻译后先重生成报表，再导出 Excel；不能拿旧版英文 `merged.json` 继续打包。
+本次统计日按北京时间确定。跨北京时间零点时重新检查各账号日期覆盖。通过现有下载和缓存校验补齐页面对应缩略图。HTML 可展开原始简介，Excel 使用整数播放量和已有对比口径。
 
-封面只用页面对应的保存缩略图。通过现有下载／缓存校验补齐，HTML 可展开中文简介，Excel 使用完整数字及已有对比口径。
+用户明确要中文版时，可以在开始采集或接入时加 `--translate`，也可以基于已采快照按说明补译。带 `--translate` 的任务在退出码 5 时返回私有待办，导入后从已提交快照继续交付。 [中文资料交付说明](translations.md)
 
 ## 八、验收与日常入口
 
@@ -245,12 +230,12 @@ macOS 入口用 `sh` 调用，不要求先修改可执行位。两平台都需�
 1. 从新 shell 重载运行时配置，项目帮助、测试和入口能运行。
 2. 真实当前日期 HTTP 分页采集成功；记录每个账号、条数、抓取起止时间、统计时间、接口整数覆盖和末页确认。不要硬编码以前的剧目数量。
 3. 全部旧快照 ID 和 fingerprint 与迁移前基准一致，旧初始值逐条一致；本次只追加有效观测或补充独立资料，默认三账号范围不变。
-4. 完整报告的每条剧都有本次正确封面、中文名、中文简介和完整数字；英文原文保留。缺失项列明，不能把未完成当完成。
-5. 真实生成并重新读取 XLSX，`workbooks_verified.json` 中数值及中文核验通过，图片数与记录数一致；不得只测试能导入 Node 包。
-6. 本机打开 HTML 检查图片和中文简介展开；检查 Excel 有效内容、中文、图片和数字。无法视觉检查时明确说明，不能冒充已看过。
+4. 核对完整报告每条剧的本次封面、原始剧名、原始简介和整数播放量。列明实际缺失项。显式交付中文版时另核对中文字段。
+5. 真实生成并重新读取 XLSX，核对 `workbooks_verified.json` 的结果，确认数值正确且图片数与记录数一致。
+6. 本机打开 HTML 检查图片和简介展开，检查 Excel 内容、图片和数字。无法视觉检查时在验收记录中说明。
 7. 检查 Git 忽略规则及 `git status`，保证私有配置、数据库、`.venv`、Node 模块、截图／报表、迁移包没有进入提交。无需为本次部署推送代码。
 
-退出码语义：0完成，2配置／采集／导出失败，3报告不完整，4需要已授权浏览器动作，5中文待补译且已采数据保留，130用户中断。遇到4／5，按上述流程继续处理，不重复采集已提交数据。
+`0` 表示完成，`2` 表示配置、采集或导出失败，`3` 表示报告不完整，`4` 表示需要已授权浏览器动作，`5` 表示显式请求的中文待补译且已采数据保留，`130` 表示用户中断。按对应流程继续处理，优先复用已提交快照。
 
 ## 九、最终交付给用户
 

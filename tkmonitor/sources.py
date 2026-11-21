@@ -48,9 +48,9 @@ def _public_host(host):
     try:
         addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     except OSError as exc:
-        raise MonitorError("TikTok DNS lookup failed; check network access.") from exc
+        raise SourceError("TikTok DNS lookup failed; check network access.", "DNS_PUBLIC_UNAVAILABLE") from exc
     if not addresses or any(not ipaddress.ip_address(address[4][0]).is_global for address in addresses):
-        raise MonitorError("TikTok request resolved to a non-public network address; request blocked.")
+        raise SourceError("TikTok request resolved to a non-public network address; request blocked.", "DNS_PUBLIC_UNAVAILABLE")
 
 
 class _SafeRedirect(HTTPRedirectHandler):
@@ -273,6 +273,11 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
         for attempt in range(retries + 1):
             try:
                 response = transport(request_url, headers, timeout)
+            except SourceError as exc:
+                if exc.code not in {"PROXY_UNAVAILABLE", "NETWORK_ERROR"} or attempt == retries:
+                    raise
+                sleep(min(backoff, 2 ** attempt))
+                continue
             except (TimeoutError, socket.timeout, URLError, ConnectionError, OSError) as exc:
                 if attempt == retries:
                     raise SourceError("HTTP request timed out or failed after bounded retries; check network access and retry collection.", "NETWORK_ERROR", account) from exc
@@ -388,7 +393,7 @@ def collect_checkpoint(path, account, expected_day, not_before=None):
     return validate_snapshot(snapshot, {account}, expected_day, not_before)
 
 
-def collect_external(config, account, expected_day, raw_dir):
+def collect_external(config, account, expected_day, raw_dir, *, network=None):
     source = account.get("source", {})
     if not isinstance(source, dict):
         raise MonitorError("Account source must be an object.")
@@ -397,7 +402,11 @@ def collect_external(config, account, expected_day, raw_dir):
     if kind == "http":
         if not source.get("request_spec"):
             raise MonitorError("HTTP source needs a private request_spec file; capture an authorized request first.")
-        snapshot = collect_http(handle, config.resolve(source["request_spec"]), raw_dir=raw_dir)
+        transport = None
+        if network is not None:
+            def transport(url, headers, timeout):
+                return network.get(url, headers, timeout, validate_host=validate_url, max_bytes=25 * 1024 * 1024)
+        snapshot = collect_http(handle, config.resolve(source["request_spec"]), transport=transport, raw_dir=raw_dir)
         return validate_snapshot(snapshot, {handle}, expected_day)
     if kind not in ("checkpoint", "browser"):
         raise MonitorError("Source type must be http, checkpoint or browser.")

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import shutil
 from contextlib import contextmanager
+from functools import partial
 import uuid
 
 from . import __version__
@@ -18,9 +19,14 @@ from .delivery import package_report, verify_workbook, workbook_name
 from .media import finalize_report
 from .migration import import_history
 from .model import MonitorError, SourceError, local_day, today
+from .network import load_network_config
 from .reports import export_report
 from .sources import collect_external
 from .store import Store
+
+
+FALLBACK_CODES = {"DNS_PUBLIC_UNAVAILABLE", "PROXY_UNAVAILABLE", "NETWORK_ERROR",
+                  "COVER_NETWORK_UNAVAILABLE", "COVER_SOURCE_UNAVAILABLE"}
 
 
 def _print(value):
@@ -54,6 +60,7 @@ def parser():
     collect.add_argument("--finalize", action="store_true", help="Complete thumbnails, label synopsis provenance and verify report coverage")
     collect.add_argument("--delivery", default=None, help="After finalization and XLSX export, verify and copy the complete delivery here")
     collect.add_argument("--recover-request", action="store_true", help="On HTTP 401/403, prepare one resumable Chrome recovery task instead of repeatedly opening pages")
+    collect.add_argument("--browser-fallback", action="store_true", help="Prepare a full Chrome capture task after an eligible network failure")
     collect.add_argument("--allow-scroll-fallback", action="store_true", help="Allow at most one scroll in an explicitly requested browser recovery")
     collect.add_argument("--browser-timeout", type=float, default=90, help="Browser preparation budget, 5..300 seconds")
     onboard = commands.add_parser("onboard", help="Reuse an account request or prepare a resumable authorized-Chrome capture")
@@ -65,6 +72,7 @@ def parser():
     onboard.add_argument("--dry-run", action="store_true", help="Plan only: no requests, browser actions or writes")
     onboard.add_argument("--new-task", action="store_true", help="Explicitly prepare a new task instead of reusing an interrupted pending capture")
     onboard.add_argument("--allow-scroll-fallback", action="store_true", help="Allow one optional scroll; default is no scrolling")
+    onboard.add_argument("--browser-fallback", action="store_true", help="Prepare a full Chrome capture task after an eligible network failure")
     onboard.add_argument("--browser-timeout", type=float, default=90, help="Browser preparation budget, 5..300 seconds")
     onboard.add_argument("--report", action="store_true")
     onboard.add_argument("--metric", choices=("display", "frontend"), default="frontend")
@@ -86,7 +94,11 @@ def parser():
     xlsx.add_argument("--metric", choices=("display", "frontend"), required=True)
     xlsx.add_argument("--folder", default=None, help="Folder already containing generated workbook_configs.json")
     for command in (report, collect, onboard, finalize, xlsx, package):
-        command.add_argument("--allow-untranslated", action="store_true", help="Explicitly allow an English-only/raw export; full deliveries otherwise require Chinese titles and synopses")
+        language = command.add_mutually_exclusive_group()
+        language.add_argument("--translate", action="store_true", default=None,
+                              help="Explicitly require Chinese titles and synopses; the default uses original text")
+        language.add_argument("--allow-untranslated", dest="translate", action="store_false",
+                              help="Compatibility option for the default original-text delivery")
     translation = commands.add_parser("translation-tasks", help="Export only missing or changed-source Chinese translation work")
     translation.add_argument("--day", default=None)
     translation.add_argument("--metric", choices=("display", "frontend"), default="frontend")
@@ -152,17 +164,19 @@ def export_xlsx(config, folder):
     return {"xlsx_export": "completed", "output": str(folder), "workbooks": verified}
 
 
-def export_collection(config, store, args):
+def export_collection(config, store, args, *, network=None):
     """Export separately so a resumable onboarding never refetches committed data."""
     expected_day = args.day or today()
-    if args.report or args.xlsx or args.finalize or args.delivery:
-        if not getattr(args, "allow_untranslated", False):
+    translate = bool(getattr(args, "translate", False))
+    if args.report or args.xlsx or args.finalize or args.delivery or translate:
+        if translate:
             from .translations import require_chinese
             require_chinese(store, config, expected_day, args.metric)
         if args.finalize or args.delivery:
-            folder, report = finalize_report(store, config, expected_day, args.metric)
+            folder, report = finalize_report(store, config, expected_day, args.metric, include_translations=translate,
+                                             network=network)
         else:
-            report = build_report(store, config, expected_day, args.metric)
+            report = build_report(store, config, expected_day, args.metric, include_translations=translate)
             folder = export_report(store, config, report)
         _print({"report": str(folder), **_report_status(report)})
         if args.xlsx or args.delivery:
@@ -173,7 +187,7 @@ def export_collection(config, store, args):
     return 0
 
 
-def collect_and_export(config, store, args, progress=None):
+def collect_and_export(config, store, args, progress=None, *, network=None):
     selected = set(args.account or config.handles)
     if not selected <= config.handles:
         raise MonitorError("Requested collection account is not configured.")
@@ -188,7 +202,7 @@ def collect_and_export(config, store, args, progress=None):
                 print("Collecting " + account["handle"] + " for Beijing day " + expected_day + ".", flush=True)
                 raw_dir = config.state_dir / "raw" / "attempts" / attempt / account["handle"]
                 try:
-                    snapshots.append(collect_external(config, account, expected_day, raw_dir))
+                    snapshots.append(collect_external(config, account, expected_day, raw_dir, network=network))
                 except SourceError as exc:
                     exc.account = account["handle"]
                     raise
@@ -210,7 +224,30 @@ def collect_and_export(config, store, args, progress=None):
     _print({"collection": "valid", "attempt": attempt, "imported_snapshots": added,
             "accounts": sorted(selected), "day": expected_day})
     # The export remains strictly after the whole-batch transaction.
-    return export_collection(config, store, args)
+    return export_collection(config, store, args, network=network)
+
+
+def _check_translated_report(store, config, folder):
+    from .config import read_json
+    from .translations import require_chinese
+
+    saved = read_json(folder / "merged.json")
+    if not saved.get("include_translations", True):
+        raise MonitorError("Regenerate this original-text report with finalize --translate before exporting or packaging it in Chinese.")
+    require_chinese(store, config, saved["report_day"], saved["metric"], report=saved)
+
+
+def _browser_fallback_enabled(args, network):
+    return getattr(args, "browser_fallback", False) or getattr(network, "browser_fallback", False)
+
+
+def _offer_browser_fallback(base, config, args, exc, *, origin_manifest=None):
+    from .browser_fallback import create_fallback
+
+    phase = "covers" if exc.code in {"COVER_NETWORK_UNAVAILABLE", "COVER_SOURCE_UNAVAILABLE"} else "collect"
+    _print(create_fallback(base, config, args, selected=set(args.account or config.handles),
+                           reason=exc.code, phase=phase, origin_manifest=origin_manifest))
+    return 4
 
 
 def run(args):
@@ -218,10 +255,43 @@ def run(args):
     if args.command in {"onboard", "collect"} and not 5 <= args.browser_timeout <= 300:
         raise MonitorError("Browser preparation budget must be between 5 and 300 seconds.")
     if args.command == "onboard":
-        if args.resume and (args.dry_run or args.new_task or args.name or args.day or args.allow_scroll_fallback or args.report or args.finalize or args.xlsx or args.delivery or args.metric != "frontend" or args.browser_timeout != 90 or args.allow_untranslated):
+        if args.resume and (args.dry_run or args.new_task or args.name or args.day or args.allow_scroll_fallback or args.browser_fallback or args.report or args.finalize or args.xlsx or args.delivery or args.metric != "frontend" or args.browser_timeout != 90 or args.translate is not None):
             raise MonitorError("Resume uses the saved task options; do not supply new target or execution options.")
         from .onboarding import run_onboard
-        return run_onboard(config, args, collect_and_export, export_collection, _print)
+        if args.dry_run:
+            return run_onboard(config, args, collect_and_export, export_collection, _print)
+        from .browser_fallback import is_fallback, linked_fallback, resume_fallback
+        network = load_network_config(config.path.parent)
+        export = partial(export_collection, network=network)
+        if args.resume and is_fallback(args.resume, config):
+            return resume_fallback(config, args.resume, export, _print)
+        if args.resume:
+            linked = linked_fallback(config, args.resume)
+            if linked:
+                return resume_fallback(config, linked, export, _print)
+        try:
+            return run_onboard(config, args, partial(collect_and_export, network=network), export, _print)
+        except SourceError as exc:
+            if exc.code not in FALLBACK_CODES:
+                raise
+            from argparse import Namespace
+            from .onboarding import account_plan, load_task, profile_handle
+            if args.resume:
+                task, path = load_task(config, args.resume)
+                options = dict(task["options"], account=task["selected_accounts"],
+                               browser_timeout=task["browser_timeout_seconds"])
+                if task.get("collected_day"):
+                    options["day"] = task["collected_day"]
+                saved_args = Namespace(**options)
+                if not _browser_fallback_enabled(saved_args, network):
+                    raise
+                return _offer_browser_fallback(config, load_config(task["account_config"]), saved_args, exc,
+                                               origin_manifest=path)
+            if not _browser_fallback_enabled(args, network):
+                raise
+            plan = account_plan(config, profile_handle(args.url), args.name)
+            options = Namespace(**vars(args), account=[plan["handle"]])
+            return _offer_browser_fallback(config, load_config(plan["config_path"]), options, exc)
     with Store(config.state_dir) as store:
         if args.command == "translation-tasks":
             from .translations import translation_tasks
@@ -241,8 +311,8 @@ def run(args):
             status["state_dir"] = str(config.state_dir)
             _print(status)
         elif args.command == "report":
-            report = build_report(store, config, args.day or today(), args.metric)
-            if not args.allow_untranslated:
+            report = build_report(store, config, args.day or today(), args.metric, include_translations=bool(args.translate))
+            if args.translate:
                 from .translations import require_chinese
                 require_chinese(store, config, report["report_day"], args.metric, report=report)
             output = export_report(store, config, report, args.output, not args.no_covers)
@@ -250,32 +320,35 @@ def run(args):
             return 0 if report["complete"] else 3
         elif args.command == "export-xlsx":
             folder = config.resolve(args.folder) if args.folder else config.report_dir / (args.day or today()) / args.metric
-            if not args.allow_untranslated:
-                from .translations import require_chinese
-                from .config import read_json
-                saved = read_json(folder / "merged.json")
-                require_chinese(store, config, saved["report_day"], args.metric, report=saved)
+            if args.translate:
+                _check_translated_report(store, config, folder)
             _print(export_xlsx(config, folder))
         elif args.command == "finalize":
-            if not args.allow_untranslated:
+            if args.translate:
                 from .translations import require_chinese
                 require_chinese(store, config, args.day or today(), args.metric)
             output = config.resolve(args.output) if args.output else None
-            folder, report = finalize_report(store, config, args.day or today(), args.metric, output, not args.no_download)
+            folder, report = finalize_report(store, config, args.day or today(), args.metric, output, not args.no_download,
+                                             include_translations=bool(args.translate),
+                                             network=load_network_config(config.path.parent) if not args.no_download else None)
             _print({"output": str(folder), "media_coverage": report["media_coverage"], **_report_status(report)})
         elif args.command == "package":
             folder = config.resolve(args.folder) if args.folder else config.report_dir / (args.day or today()) / args.metric
-            if not args.allow_untranslated:
-                from .translations import require_chinese
-                from .config import read_json
-                saved = read_json(folder / "merged.json")
-                require_chinese(store, config, saved["report_day"], args.metric, report=saved)
+            if args.translate:
+                _check_translated_report(store, config, folder)
             output = config.resolve(args.output) if args.output else None
             _print(package_report(folder, output))
         elif args.command == "collect":
+            network = load_network_config(config.path.parent)
             try:
-                return collect_and_export(config, store, args)
+                return collect_and_export(config, store, args, network=network)
             except SourceError as exc:
+                if exc.code in FALLBACK_CODES and _browser_fallback_enabled(args, network):
+                    selected = set(args.account or config.handles)
+                    if exc.code in {"COVER_NETWORK_UNAVAILABLE", "COVER_SOURCE_UNAVAILABLE"} or all(
+                            account.get("source", {}).get("type", "http") == "http"
+                            for account in config.accounts if account["handle"] in selected):
+                        return _offer_browser_fallback(config, config, args, exc)
                 if not args.recover_request or exc.code != "AUTH_REQUIRED":
                     raise
                 from .onboarding import account_lock, account_plan, create_browser_task, pending_result
@@ -295,7 +368,8 @@ def main(argv=None):
         if getattr(exc, "code", None) == "NEEDS_TRANSLATION":
             _print(exc.result)
             return 5
-        print("ERROR: " + str(exc), file=sys.stderr)
+        code = getattr(exc, "code", None)
+        print(f"ERROR [{code}]: {exc}" if code else "ERROR: " + str(exc), file=sys.stderr)
         return 2
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
         # External errors can contain signed URLs or headers. Never echo them.

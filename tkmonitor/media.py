@@ -10,20 +10,21 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .analysis import build_report
 from .config import read_json
-from .model import MonitorError, valid_day
+from .model import MonitorError, SourceError, valid_day
 from .reports import export_report, _json_file
 from .sources import _public_host
 
 HISTORICAL = "【此前保存的中文资料，尚未核对本次英文原文】\n"
 PENDING = "【中文待翻译；以下为本次采集的英文简介】\n"
 MAX_BYTES = 8_000_000
+REGIONAL_COVER_HOSTS = {"p16-common-sign.tiktokcdn-us.com", "p19-common-sign.tiktokcdn-us.com"}
 
 
 def cover_host(url):
     try:
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
-        allowed = (parts.scheme == "https" and host.endswith(".tiktokcdn.com")
+        allowed = (parts.scheme == "https" and (host.endswith(".tiktokcdn.com") or host in REGIONAL_COVER_HOSTS)
                    and parts.username is None and parts.password is None
                    and parts.port in (None, 443) and not parts.fragment)
     except (TypeError, ValueError):
@@ -42,10 +43,16 @@ class _CoverRedirect(HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, target)
 
 
-def fetch_cover(url):
+def fetch_cover(url, *, network=None):
     """A bounded, TLS-verified GET; never send the private API request headers."""
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/"}
+    if network is not None:
+        response = network.get(url, headers, 12, validate_host=cover_host, max_bytes=MAX_BYTES)
+        if response.status != 200 or cover_host(response.url) != cover_host(url):
+            raise MonitorError("Thumbnail request did not return a successful same-host response.")
+        return response.body
     _public_host(cover_host(url))
-    request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/"})
+    request = Request(url, headers=headers)
     # Match the successful daily downloader, independent of stale shell proxy settings.
     with build_opener(ProxyHandler({}), _CoverRedirect()).open(request, timeout=12) as response:
         if response.status != 200 or cover_host(response.geturl()) != cover_host(url):
@@ -97,7 +104,7 @@ def complete_covers(store, report, download=True, transport=fetch_cover, sleep=t
     _image_module()
     jobs = []
     for row in report["rows"]:
-        metadata = store.metadata_at(row["account"], row["id"], row["recorded_at"])
+        metadata = store.metadata_at(row["account"], row["id"], row["recorded_at"], include_translations=False)
         jobs.append((row, metadata.get("thumbnail_url")))
 
     def finish(job):
@@ -119,8 +126,10 @@ def complete_covers(store, report, download=True, transport=fetch_cover, sleep=t
                     return {**result, "status": "cached"}, destination
                 except (OSError, ValueError):
                     pass
-        if not download or not url:
+        if not download:
             return result, None
+        if not url:
+            return {**result, "error_code": "COVER_SOURCE_UNAVAILABLE"}, None
         try:
             cover_host(url)
         except MonitorError:
@@ -131,6 +140,8 @@ def complete_covers(store, report, download=True, transport=fetch_cover, sleep=t
                 return {**result, "status": "downloaded"}, destination
             except (OSError, ValueError, MonitorError) as exc:
                 result["error_type"] = type(exc).__name__
+                if getattr(exc, "code", None):
+                    result["error_code"] = exc.code
                 if attempt < 2:
                     sleep(attempt + 1)
         return result, None
@@ -169,21 +180,29 @@ def historical_references(config, day, metric, output):
     return references
 
 
-def finalize_report(store, config, day, metric="frontend", output=None, download=True):
+def finalize_report(store, config, day, metric="frontend", output=None, download=True, *, include_translations=True, network=None):
     valid_day(day)
     output = Path(output) if output else config.report_dir / day / metric
-    references = historical_references(config, day, metric, output)
-    before = build_report(store, config, day, metric)
+    references = historical_references(config, day, metric, output) if include_translations else {}
+    before = build_report(store, config, day, metric, include_translations=include_translations)
     fingerprints = list(store.connection.execute("SELECT id,fingerprint FROM snapshots ORDER BY id"))
     fingerprints = [tuple(row) for row in fingerprints]
-    downloads = complete_covers(store, before, download)
+    if network is None:
+        downloads = complete_covers(store, before, download)
+    else:
+        downloads = complete_covers(store, before, download, transport=lambda url: fetch_cover(url, network=network))
     valid_covers = {(item["account"], item["id"]) for item in downloads if item["status"] in {"existing", "cached", "downloaded"}}
-    report = build_report(store, config, day, metric)
-    coverage = {"records": len(report["rows"]), "covers": 0, "english_synopses": 0,
-                "current_chinese": 0, "historical_chinese": 0, "english_only": 0}
+    report = build_report(store, config, day, metric, include_translations=include_translations)
+    coverage = {"records": len(report["rows"]), "covers": 0, "english_synopses": 0}
+    if include_translations:
+        coverage.update(current_chinese=0, historical_chinese=0, english_only=0)
     for row in report["rows"]:
         coverage["covers"] += (row["account"], row["id"]) in valid_covers
         coverage["english_synopses"] += bool(row.get("description_en"))
+        if not include_translations:
+            if row.get("description_en"):
+                row["synopsis_provenance"] = "Original synopsis from saved source"
+            continue
         current = store.metadata_at(row["account"], row["id"], row["recorded_at"]).get("description_zh")
         reference = references.get((row["account"], row["id"], row["title"]))
         if current:
@@ -216,5 +235,16 @@ def finalize_report(store, config, day, metric="frontend", output=None, download
                     "downloads": downloads}
     _json_file(folder / "media_validation.json", verification)
     if not complete:
+        unavailable = [item for item in downloads if item["status"] not in {"existing", "cached", "downloaded"}]
+        if (unavailable and report["complete"] and report["metric_coverage"]["status"] == "complete"
+                and coverage["records"] == coverage["english_synopses"]):
+            errors = {item.get("error_code") for item in unavailable}
+            network_errors = {"DNS_PUBLIC_UNAVAILABLE", "PROXY_UNAVAILABLE", "NETWORK_ERROR"}
+            if errors <= network_errors:
+                raise SourceError("Report finalization is incomplete: cover download network failed. Valid collection data is preserved.",
+                                  "COVER_NETWORK_UNAVAILABLE")
+            if errors <= network_errors | {"COVER_SOURCE_UNAVAILABLE"}:
+                raise SourceError("Report finalization is incomplete: some cover URLs are missing. Valid collection data is preserved.",
+                                  "COVER_SOURCE_UNAVAILABLE")
         raise MonitorError("Report finalization is incomplete; inspect media_validation.json. Valid collection data is preserved.")
     return folder, report

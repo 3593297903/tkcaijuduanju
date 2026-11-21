@@ -4,9 +4,26 @@
 
 双击仓库根目录的`run_daily.cmd`。本机`runtime.local.cmd`已设置现有Python/Node运行环境，`config.local.json`和`request-specs/*.local.json`已配置三个监测账号。这些文件被Git忽略。
 
-正常流程是HTTP分页采集、完整性校验、提交SQLite，再导出CSV、JSON及离线网页。数字采集不调用大模型，不需要让模型逐页看页面。默认中文交付另检查剧名和简介，缺失时返回翻译任务和退出码5，由Codex补译、导入再继续导出；无需重新采集。退出码0才表示本次流水线完成；失败不会拿旧数据当今天。
+正常流程是 HTTP 分页采集、完整性校验、提交 SQLite，再用原始剧名和简介导出 CSV、JSON、离线网页及 Excel。默认流程无翻译待办。退出码 0 表示本次流水线完成。报告只使用指定统计日的有效数据。
 
-报表位于`_local/state/reports/北京时间日期/frontend/monitor.html`，可离线双击查看。可追加`--xlsx`导出三个Excel。Excel导出失败时，采集及已有报表仍保存，可单独运行`export-xlsx`重做，不必再抓数据。
+报表位于 `_local/state/reports/北京时间日期/frontend/monitor.html`，可离线双击查看。每日入口同时导出各账号的 Excel。Excel 导出失败时，可以单独运行 `export-xlsx`，复用本次采集及已有报表。
+
+## 项目专用代理与 DNS
+
+项目目录下的 `network.local.json` 为本机私有配置。列表、封面、接入恢复和 `finalize` 下载共用此配置。没有该文件时使用原有网络路径。隔离验收可用 `TKMONITOR_NETWORK_CONFIG` 指向私有配置文件。
+
+```json
+{
+  "mode": "proxy",
+  "proxy": "http://127.0.0.1:7897",
+  "dns_url": "https://dns.google/resolve",
+  "browser_fallback": true
+}
+```
+
+端口填写本机已验证可信的 HTTP 代理端口。DNS 支持上例或 `https://cloudflare-dns.com/dns-query`。项目通过代理建立到经公网校验的 IPv4 地址的隧道，仍用原域名验证 TLS。代理配置只在项目进程内生效。
+
+`browser_fallback` 可省略，省略时关闭。也可以在发起 `collect` 或 `onboard --url` 时传 `--browser-fallback`。启用后，合适的 DNS 或代理故障可返回浏览器全量任务。列表已入库、封面因网络或缺少来源地址无法完成的情况，可返回只补封面的任务。独立 `finalize` 使用同一网络配置，负责重做已有快照的报表。 [浏览器备用任务的操作](browser-session.md#全量采集与封面备用任务)
 
 ## 第一次在另一台电脑运行
 
@@ -33,7 +50,7 @@
 
 ## 资料和备份
 
-已有封面和中文资料按账号、ID及确切原文复用。新剧及原文变化的剧目进入增量补译，原始英文留存；缺中文不能作为完整报表交付。按[中文资料交付说明](translations.md)补译后重做导出即可。明确只需数字或原文时可使用`--allow-untranslated`。新图像URL保留但下载补图是单独步骤。整剧发布时间未知时留空，关联视频日期不冒充上线日期。
+封面可复用本机已有文件，缺图时按本次采集保存的 URL 下载并核验。原文报表直接显示平台资料。需要中文时加 `--translate`，按账号、剧目 ID 及确切原文复用译文，再对新增或原文变化的条目补译。补齐后可直接重做报表。整剧发布时间未知时留空。 [中文资料交付说明](translations.md)
 
 `legacy/v1`及版本标签保留旧方法。完整旧资料ZIP在本机`_local/`中。定期在程序未写入时备份`_local/state/`；公共GitHub只保存源码、文档和脱敏测试数据。
 

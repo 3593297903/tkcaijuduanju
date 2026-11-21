@@ -80,6 +80,20 @@ class SavedWorkbookTests(LocalCase):
         with self.assertRaisesRegex(MonitorError, "structure"):
             verify_workbook(path, config)
 
+    def test_original_text_verification_decodes_excel_escapes_once(self):
+        config = self.configuration()
+        config["include_translations"] = False
+        config["rows"][0].update(description_en="Part A\x1ePart B\r\n\t literal _x001E_", genre="Family")
+        path = self.root / "source.xlsx"
+        values = {"C8": config["rows"][0]["status"],
+                  "V8": "Part A_x001E_Part B_x000D_\n\t literal _x005F_x001E_"}
+        saved_book(path, config, values)
+        self.assertTrue(verify_workbook(path, config)["original_text_verified"])
+        values["V8"] = values["V8"].replace("_x005F_x001E_", "_x001E_")
+        saved_book(path, config, values)
+        with self.assertRaisesRegex(MonitorError, "V8"):
+            verify_workbook(path, config)
+
     def test_account_exports_use_separate_bounded_processes_and_verify_saved_files(self):
         config = self.configuration()
         second = {**config, "prefix": "Second", "name": "Second"}

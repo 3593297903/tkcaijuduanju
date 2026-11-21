@@ -124,6 +124,7 @@ class OnboardingTests(unittest.TestCase):
         task = self.task()
         again = self.task()
         self.assertEqual(task, again)
+        self.assertIs(json.loads(task.read_text(encoding="utf-8"))["options"]["translate"], False)
         self.assertFalse((self.root / "config.new.local.json").exists())
         self.assertFalse((self.root / "state").exists())
         code, result = self.invoke("onboard", "--resume", str(task))
@@ -132,7 +133,12 @@ class OnboardingTests(unittest.TestCase):
 
     def test_existing_legacy_spec_is_reused_with_no_extra_probe_and_single_account_report(self):
         original = self.config_path.read_bytes()
-        code, results = self.invoke("onboard", "--url", "https://www.tiktok.com/@old", "--report", "--allow-untranslated", transport=self.transport)
+        with (
+            patch("tkmonitor.translations.require_chinese", side_effect=AssertionError("Unexpected translation check")),
+            patch("tkmonitor.translations.translation_tasks", side_effect=AssertionError("Unexpected translation task")),
+        ):
+            code, results = self.invoke("onboard", "--url", "https://www.tiktok.com/@old", "--report",
+                                        transport=self.transport)
         self.assertEqual(code, 0)
         self.assertEqual(len(self.requests), 1)
         self.assertIn("cursor=0", self.requests[0])
@@ -141,7 +147,32 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.config_path.read_bytes(), original)
         report = json.loads((self.root / "state/account-reports/old" / today() / "frontend/merged.json").read_text(encoding="utf-8"))
         self.assertEqual(report["missing_accounts"], [])
+        self.assertIs(report["include_translations"], False)
+        self.assertEqual(report["rows"][0]["title"], "Synthetic One")
+        self.assertEqual(report["rows"][0]["description_en"], "Saved original synopsis")
         self.assertEqual(report["rows"][0]["today_views"], PRECISE)
+
+    def test_legacy_manifest_resumes_original_text_regardless_of_old_language_flag(self):
+        with (
+            patch("tkmonitor.translations.require_chinese", side_effect=AssertionError("Unexpected translation check")),
+            patch("tkmonitor.translations.translation_tasks", side_effect=AssertionError("Unexpected translation task")),
+        ):
+            for allow_untranslated in (False, True):
+                with self.subTest(allow_untranslated=allow_untranslated):
+                    handle = "legacy_" + str(allow_untranslated).lower()
+                    task_path = self.task(handle, "--report")
+                    task = self.capture(task_path)
+                    del task["options"]["translate"]
+                    task["options"]["allow_untranslated"] = allow_untranslated
+                    atomic_json(task_path, task)
+                    code, _ = self.invoke("onboard", "--resume", str(task_path), transport=self.transport)
+                    self.assertEqual(code, 0, self.stderr)
+                    report_path = self.root / "state/account-reports" / handle / today() / "frontend/merged.json"
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    self.assertIs(report["include_translations"], False)
+                    self.assertEqual(report["rows"][0]["description_en"], "Saved original synopsis")
+        self.assertEqual(len(self.requests), 2)
+        self.assertFalse((self.root / "state/translation_tasks").exists())
 
     def test_original_three_account_collect_makes_only_its_three_normal_requests(self):
         self.base_data["accounts"] = []
@@ -257,7 +288,15 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
 
     def test_translation_pause_then_import_and_resume_does_not_recollect(self):
-        task_path = self.task("new", "--report"); self.capture(task_path)
+        task_path = self.task("new", "--report", "--translate")
+        task = self.capture(task_path)
+        self.assertIs(task["options"]["translate"], True)
+        manifest_before = task_path.read_bytes()
+        code, _ = self.invoke("onboard", "--resume", str(task_path), "--translate", transport=self.transport)
+        self.assertEqual(code, 2, self.stderr)
+        self.assertIn("saved task options", self.stderr)
+        self.assertEqual(task_path.read_bytes(), manifest_before)
+        self.assertEqual(self.requests, [])
         code, results = self.invoke("onboard", "--resume", str(task_path), transport=self.transport)
         self.assertEqual(code, 5, self.stderr)
         self.assertEqual(self.store_count(), 1)
@@ -329,10 +368,10 @@ class OnboardingTests(unittest.TestCase):
                 "source": {"type": "http", "request_spec": "request-specs/" + handle + ".local.json"}})
             atomic_json(self.root / ("request-specs/" + handle + ".local.json"), spec(handle))
         atomic_json(self.config_path, self.base_data); original = self.config_path.read_bytes()
-        def snapshot(config, account, day, raw):
+        def snapshot(config, account, day, raw, *, network=None):
             at = iso_time(now_utc())
             return Snapshot(account["handle"] + ":" + at, account["handle"], at, "synthetic", (Record(ONE, "One", None, 123),), at)
-        def first(config, account, day, raw):
+        def first(config, account, day, raw, *, network=None):
             if account["handle"] == "old_b":
                 raise SourceError("Synthetic rejected request", "AUTH_REQUIRED")
             return snapshot(config, account, day, raw)

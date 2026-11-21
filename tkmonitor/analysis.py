@@ -52,7 +52,7 @@ def summarize(rows):
     return summary
 
 
-def build_report(store, config, day, metric="display"):
+def build_report(store, config, day, metric="display", *, include_translations=True):
     valid_day(day)
     if metric not in METRICS:
         raise MonitorError("Metric must be explicitly selected as display or frontend.")
@@ -61,6 +61,7 @@ def build_report(store, config, day, metric="display"):
     snapshots = [snapshot for snapshot in store.snapshots() if snapshot.account in config.handles and local_day(snapshot.captured_at) <= day]
     if not any(local_day(snapshot.captured_at) == day for snapshot in snapshots):
         raise MonitorError("No valid snapshot exists for this Beijing calendar day; collect or import that day first. Missing dates are never filled forward.")
+    language_mode = {} if include_translations else {"include_translations": False}
     reports, all_rows, missing = [], [], []
     for account in config.accounts:
         handle = account["handle"]
@@ -89,9 +90,7 @@ def build_report(store, config, day, metric="display"):
                     last_records[record.id] = (record, snapshot.captured_at, snapshot.id)
         rows = []
         for index, record in enumerate(current.records, 1):
-            metadata = store.metadata_at(handle, record.id, current.captured_at)
-            if metadata.get("source_title") and metadata["source_title"] != record.title:
-                metadata.pop("title_zh", None)
+            metadata = store.metadata_at(handle, record.id, current.captured_at, include_translations=include_translations)
             initial = earliest.get(record.id)
             legacy_initial = store.baseline(handle, record.id, metric)
             if legacy_initial and parse_time(legacy_initial["captured_at"]) <= parse_time(current.captured_at):
@@ -105,10 +104,7 @@ def build_report(store, config, day, metric="display"):
             last_value = getattr(last[0], metric_field) if last else None
             first_observation = next(snapshot for snapshot in history if any(item.id == record.id for item in snapshot.records))
             row = {**metadata, "account": handle, "account_name": account["name"], "order": index,
-                "id": record.id, "title": record.title, "title_zh": metadata.get("title_zh") or "待翻译",
-                "description_zh": metadata.get("description_zh") or "待翻译／待补充原始简介",
-                "genre": metadata.get("genre") or "待归纳", "episodes": metadata.get("episodes"),
-                "metadata_status": "available" if metadata.get("title_zh") and metadata.get("description_zh") else "pending",
+                "id": record.id, "title": record.title, "episodes": metadata.get("episodes"),
                 "metric": metric, "metric_label": METRIC_LABELS[metric], "display": record.views_raw,
                 "views_display": record.views_raw, "views_approx": record.display_views, "approx": record.display_views,
                 "initial_views": initial_value, "initial_recorded_at": initial[1] if initial else None,
@@ -126,6 +122,16 @@ def build_report(store, config, day, metric="display"):
                 "collection_started_at": current.collection_started_at,
                 "source": current.source, "snapshot_id": current.id,
                 "precision_note": "页面缩写折算值，历史低位不可恢复" if metric == "display" else "仅使用已保存的前端整数；未知不以页面折算值填充"}
+            if include_translations:
+                title_zh = metadata.get("title_zh") if metadata.get("source_title") in (None, "", record.title) else None
+                description_zh = metadata.get("description_zh")
+                row.update(title_zh=title_zh or "待翻译", description_zh=description_zh or "待翻译／待补充原始简介",
+                           genre=metadata.get("genre") or "待归纳",
+                           metadata_status="available" if title_zh and description_zh else "pending")
+            else:
+                themes = metadata.get("platform_themes")
+                genre = "、".join(theme for theme in themes if isinstance(theme, str)) if isinstance(themes, list) else ""
+                row.update(title_zh=None, description_zh=None, genre=genre, metadata_status="source")
             for prefix, after, base in (("day", current_value, yesterday_value),
                     ("yesterday_from_initial", yesterday_value, initial_value), ("today_from_initial", current_value, initial_value),
                     ("last", current_value, last_value)):
@@ -149,7 +155,7 @@ def build_report(store, config, day, metric="display"):
             "source": "https://www.tiktok.com/@" + handle, "afterTime": current.captured_at,
             "beforeTime": before[-1].captured_at if before else None, "report_day": day, "previous_day": previous_day,
             "last_day": local_day(before[-1].captured_at) if before else None, "metric": metric,
-            "summary": summary, "rows": rows, "records": rows})
+            "summary": summary, "rows": rows, "records": rows, **language_mode})
         all_rows.extend(rows)
     summary = summarize(all_rows)
     known, total = summary["today_count"], summary["count"]
@@ -166,4 +172,4 @@ def build_report(store, config, day, metric="display"):
             "complete": not missing and known > 0, "account_coverage_complete": not missing,
             "metric_coverage": metric_coverage, "warnings": warnings,
             "missing_accounts": missing, "available_days": available_days,
-            "summary": summary, "accounts": reports, "rows": all_rows}
+            "summary": summary, "accounts": reports, "rows": all_rows, **language_mode}

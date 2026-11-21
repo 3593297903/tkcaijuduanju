@@ -92,7 +92,7 @@ nodeRepl.write(result);
 python -X utf8 -m tkmonitor --config config.local.json onboard --resume '_local/onboarding/实际任务ID.local.json'
 ```
 
-恢复使用任务内保存的目标和导出参数，不应额外修改 `--name`、`--day` 或导出选项。候选请求验证通过才激活，之后仍从 cursor0 读取完整账号，不直接把捕获的一页作为快照提交。
+恢复沿用任务内保存的账号、日期、导出及语言选项。只有起始命令加了 `--translate` 的任务才请求中文，旧 manifest 没有该选项时默认交付原文。执行 `--resume` 时只传 manifest。候选请求验证通过后才激活，正式采集仍从 cursor0 开始，直到确认末页。
 
 导出失败后再次 resume 会核对已提交的快照证据，只重做导出。已完成任务重复 resume 返回完成回执，不再采集。若还没提交且已跨北京时间午夜，则重新确定当天并重新请求，不将旧响应当今天。
 
@@ -132,9 +132,9 @@ python -X utf8 -m tkmonitor --config config.local.json collect --recover-request
 
 同账号操作采用OS文件锁，进程退出自动释放。候选先核验再替换，请求与配置更新分别记录阶段，不能宣称文件系统和SQLite组成了跨资源原子事务。
 
-采集仍由 `collect_http` 负责整数、唯一ID、游标偏移、引用项与终页核对。保留初始值、历史、双指标隔离、缩略图及原文。中文默认按[中文资料交付说明](translations.md)补齐；缺失时返回退出码5，导入翻译后再次 `onboard --resume`，直接使用已提交快照继续导出，不重采。发布时间未知仍留空。默认监测范围不会因为调用 `onboard` 自动扩大。
+采集仍由 `collect_http` 负责整数、唯一 ID、游标偏移、引用项与终页核对。报表默认使用原始剧名、简介和缩略图，发布时间未知时留空。带 `--translate` 的任务缺译时返回退出码 5，导入译文后再次运行 `onboard --resume`，复用已提交快照继续导出。 [中文资料交付说明](translations.md)
 
-退出码：0完成或只读计划通过，2失败，3报告不完整，4需要浏览器/恢复动作，5中文待补译且有效采集已保留，130中断。`DRY_RUN` 不代表已采集；`READY_TO_RESUME` 不代表全量完成。
+`0` 表示完成或只读计划通过，`2` 表示失败，`3` 表示报告不完整，`4` 表示需要浏览器或恢复动作，`5` 表示显式请求的中文待补译且有效采集已保留，`130` 表示中断。`DRY_RUN` 表示计划通过。`READY_TO_RESUME` 表示请求已准备好，接下来可以执行正式采集。
 
 ```powershell
 python -X utf8 -m unittest discover -s tests -v

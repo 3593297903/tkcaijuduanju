@@ -19,6 +19,16 @@ const result=spawnSync(process.execPath,['--expose-gc','--v8-pool-size=1','--max
 assert.equal(result.status,0,result.stderr+'\n'+result.stdout);
 assert(result.stdout.includes('"last_rate":0.25'),result.stdout);
 console.log('Real workbook engine passed: partial current metric uses the paired last-value denominator.');
+const originals=rows.map(row=>({...row,status:'已有',description_en:'Part A\u001ePart B\r\n\t literal _x001E_'}));
+const sourceConfig={...cfg,prefix:'Original',include_translations:false,rows:originals};
+await fs.writeFile(path.join(folder,'workbook_configs.json'),JSON.stringify([sourceConfig]));
+const saved=spawnSync(process.execPath,['--expose-gc','--no-opt','--v8-pool-size=1','--max-old-space-size=384','--no-wasm-tier-up','--wasm-num-compilation-tasks=1',script,folder],{env:process.env,encoding:'utf8',timeout:120000});
+assert.equal(saved.error,undefined,saved.error?.message);
+assert.equal(saved.status,0,saved.stderr+'\n'+saved.stdout);
+const manifest=JSON.parse(await fs.readFile(path.join(folder,'export_manifest.json'),'utf8'));
+assert.equal(manifest.length,1);
+assert((await fs.readdir(folder)).some(file=>file.startsWith('Original_')&&file.endsWith('.xlsx')));
+console.log('Real workbook engine saved a source synopsis containing a record separator and a literal escape marker.');
 // Only remove files created in this freshly returned temporary directory.
 for(const file of await fs.readdir(folder))await fs.unlink(path.join(folder,file));
 await fs.rmdir(folder);

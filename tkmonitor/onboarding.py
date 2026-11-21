@@ -26,7 +26,7 @@ from .store import Store
 SCHEMA = "tkmonitor.onboarding/v1"
 HEADERS = {"accept", "accept-language", "referer", "user-agent"}
 TASK_PATTERN = re.compile(r"[a-f0-9]{32}\Z")
-RUN_FLAGS = ("report", "metric", "finalize", "xlsx", "delivery", "allow_untranslated")
+RUN_FLAGS = ("report", "metric", "finalize", "xlsx", "delivery")
 
 
 def file_digest(path):
@@ -149,7 +149,9 @@ def _activate_config(plan):
 
 
 def _options(args, config):
-    result = {key: getattr(args, key, False if key == "allow_untranslated" else None) for key in RUN_FLAGS}
+    result = {key: getattr(args, key, None) for key in RUN_FLAGS}
+    result["translate"] = bool(getattr(args, "translate", False))
+    result["browser_fallback"] = bool(getattr(args, "browser_fallback", False))
     result["metric"] = result["metric"] or "frontend"
     if result["delivery"]:
         result["delivery"] = str(config.resolve(result["delivery"]))
@@ -157,6 +159,15 @@ def _options(args, config):
     if result["day"]:
         valid_day(result["day"])
     return result
+
+
+def _saved_options(options):
+    normalized = dict(options)
+    # A legacy manifest contains no explicit translation request.
+    normalized.pop("allow_untranslated", None)
+    normalized.setdefault("translate", False)
+    normalized.setdefault("browser_fallback", False)
+    return normalized
 
 
 def create_browser_task(base, plan, args, *, scope="single", selected=None):
@@ -170,7 +181,8 @@ def create_browser_task(base, plan, args, *, scope="single", selected=None):
         prior = read_json(path)
         if (prior.get("schema") == SCHEMA and prior.get("state") == "needs_browser"
                 and prior.get("base_config") == str(base.path) and prior.get("account") == plan["handle"]
-                and prior.get("scope") == scope and prior.get("options") == options
+                and prior.get("scope") == scope and isinstance(prior.get("options"), dict)
+                and _saved_options(prior["options"]) == options
                 and prior.get("base_fingerprint") == file_digest(base.path)
                 and prior.get("account_config_fingerprint") == plan["config_fingerprint"]
                 and prior.get("selected_accounts") == sorted(selected or {plan["handle"]})
@@ -231,13 +243,15 @@ def load_task(base, path):
     options = task.get("options")
     if (not isinstance(options, dict) or options.get("metric") not in {"frontend", "display"}
             or any(not isinstance(options.get(k), bool) for k in ("report", "finalize", "xlsx"))
+            or not isinstance(options.get("translate", False), bool)
+            or not isinstance(options.get("browser_fallback", False), bool)
             or options.get("delivery") is not None and not isinstance(options["delivery"], str)
             or not isinstance(task.get("selected_accounts"), list)
             or set(task["selected_accounts"]) != ({task["account"]} if task["scope"] == "single" else set(task["selected_accounts"]))):
         raise MonitorError("Onboarding execution options are invalid.")
     if options.get("day"):
         valid_day(options["day"])
-    options.setdefault("allow_untranslated", False)
+    task["options"] = _saved_options(options)
     if task["scope"] == "batch" and (not set(task["selected_accounts"]) <= base.handles or task["account"] not in task["selected_accounts"]):
         raise MonitorError("Onboarding recovery batch is outside the configured accounts.")
     return task, path

@@ -16,7 +16,14 @@ if(!process.argv[2])throw new Error('Usage: node integrations/export_workbooks.m
 const out=path.resolve(process.argv[2]);
 const configs=JSON.parse(await fs.readFile(path.join(out,'workbook_configs.json'),'utf8'));
 const dateValue=s=>s==null?null:Date.parse(s)/86400000+25569+8/24;
-const headers=['序号','页面小封面','中文剧名','英文剧名','初始播放量（次）','昨天播放量（次）','今天播放量（次）',
+// Preserve the original code points without passing illegal XML characters to the writer.
+// Escape the leading underscore of any literal _xHHHH_ sequence as well.
+function xlsxCellText(value){
+  if(typeof value!=='string')return value;
+  return value.replace(/_(?=x[0-9a-f]{4}_)|[\u0000-\u0008\u000B-\u000D\u000E-\u001F\uFFFE\uFFFF]/gi,
+    character=>character==='_'?'_x005F_':'_x'+character.charCodeAt(0).toString(16).toUpperCase().padStart(4,'0')+'_');
+}
+const translatedHeaders=['序号','页面小封面','中文剧名','英文剧名','初始播放量（次）','昨天播放量（次）','今天播放量（次）',
   '今天较昨天增加（次）','今天较昨天涨跌幅','昨天较初始增加（次）','昨天较初始涨跌幅','今天较初始增加（次）','今天较初始涨跌幅',
   '首次记录时间（北京时间）','昨天记录时间（北京时间）','今天记录时间（北京时间）','本次已采前端整数','主统计口径','集数',
   '关联视频时间（北京时间）','预告标记','中文简介','题材归纳','剧目ID','关联视频ID','来源视频链接','缩略图文件','上次实际播放量','较上次增加（次）','较上次涨跌幅','上次实际采集时间'];
@@ -28,27 +35,37 @@ const manifests=[];
 for(const cfg of configs){
   console.log('Starting '+cfg.name);
   if(!cfg.rows.length){manifests.push({account:cfg.name,rows:0,skipped:'No observations on selected day'});continue;}
+  const includeTranslations=cfg.include_translations!==false;
+  const headers=[...translatedHeaders];
+  if(!includeTranslations){
+    headers[2]='剧目状态';
+    headers[3]='原始剧名';
+    headers[21]='原始简介';
+    headers[22]='平台题材';
+  }
   const metricLabel=cfg.metric_label||({display:'页面显示折算整数',frontend:'接口返回整数'}[cfg.metric])||'未指定';
   const rows=cfg.rows,start=8,end=start+rows.length-1,total=end+1;
   const wb=Workbook.create(),sheet=wb.worksheets.add('剧目统计');
   sheet.showGridLines=false;sheet.tabColor='#243449';
   sheet.getRange(`A1:AE${total}`).format={font:{name:'Arial',size:10,color:'#203047'},verticalAlignment:'center',rowHeight:28};
   sheet.getRange('A1:AE1').format.rowHeight=10;
-  sheet.getRange('A2').values=[[`${cfg.name} ${rows.length}部剧：初始、昨天、今天播放量监测`]];
+  sheet.getRange('A2').values=[[xlsxCellText(`${cfg.name} ${rows.length}部剧：初始、昨天、今天播放量监测`)]];
   sheet.getRange('A2').format.font={name:'Arial',size:14,bold:true,color:'#203047'};
   sheet.getRange('A2:AE2').format.borders={bottom:{style:'thin',color:'#B8C5D2'}};
-  sheet.getRange('A3').values=[[`来源：${cfg.source}（Short dramas）。统计日：${cfg.report_day}；昨天：${cfg.previous_day}。今天记录时间：${rows[0].recorded_at_beijing}。`]];
-  sheet.getRange('A4').values=[[`单位：次。E至M统计口径：${metricLabel}。只比较相同口径；缺失留空。Q列单列本次接口整数。`]];
+  sheet.getRange('A3').values=[[xlsxCellText(`来源：${cfg.source}（Short dramas）。统计日：${cfg.report_day}；昨天：${cfg.previous_day}。今天记录时间：${rows[0].recorded_at_beijing}。`)]];
+  sheet.getRange('A4').values=[[xlsxCellText(`单位：次。E至M统计口径：${metricLabel}。只比较相同口径；缺失留空。Q列单列本次接口整数。`)]];
   sheet.getRange('A5').values=[['初始按每部剧首次记录固定，每日取最后有效快照；新增剧昨天留空。涨幅使用相应可比剧目分母。AB至AE单独比较上次实际采集，跨日增量不冒充单日。未知发布时间未推算。']];
   sheet.getRange('A3:AE5').format.font={name:'Arial',size:10,color:'#607086'};
   sheet.getRange('A6:AE6').format.rowHeight=10;
   sheet.getRange('A7:AE7').values=[headers];
   sheet.getRange(`X${start}:Y${end}`).setNumberFormat('@');
-  const values=rows.map(r=>[r.order,null,r.title_zh||'中文名待补',r.title,r.initial_views,r.yesterday_views,r.today_views,
+  const values=rows.map(r=>[r.order,null,includeTranslations?(r.title_zh||'中文名待补'):(r.status||null),r.title,r.initial_views,r.yesterday_views,r.today_views,
     null,null,null,null,null,null,dateValue(r.initial_recorded_at),dateValue(r.yesterday_recorded_at),dateValue(r.today_recorded_at),
     r.today_frontend_integer,metricLabel,r.episodes,r.create_time==null?null:r.create_time/86400+25569+8/24,
-    r.is_preview==null?'未采集':r.is_preview?'是':'否',r.description_zh||r.description_en||'简介待补',r.genre||'题材待补',String(r.id),r.video_id==null?'':String(r.video_id),r.video_url,r.thumbnail,r.last_views,null,null,dateValue(r.last_recorded_at)]);
-  sheet.getRange(`A${start}:AE${end}`).values=values;
+    r.is_preview==null?'未采集':r.is_preview?'是':'否',
+    includeTranslations?(r.description_zh||r.description_en||'简介待补'):(r.description_en||null),
+    r.genre||(includeTranslations?'题材待补':null),String(r.id),r.video_id==null?'':String(r.video_id),r.video_url,r.thumbnail,r.last_views,null,null,dateValue(r.last_recorded_at)]);
+  sheet.getRange(`A${start}:AE${end}`).values=values.map(row=>row.map(xlsxCellText));
   sheet.getRange(`H${start}:M${start}`).formulas=[[
     `=IF(AND(ISNUMBER(F${start}),ISNUMBER(G${start})),G${start}-F${start},"")`,
     `=IF(AND(ISNUMBER(F${start}),ISNUMBER(G${start})),IF(F${start}=0,"",H${start}/F${start}),"")`,
@@ -77,7 +94,7 @@ for(const cfg of configs){
   sheet.getRange(`A${start}:AE${end}`).format.rowHeightPx=106;
   sheet.getRange(`E${start}:Q${total}`).format.horizontalAlignment='right';
   sheet.getRange(`C${start}:C${end}`).format.font={name:'Arial',size:10,bold:true,color:'#355D89'};
-  widths.forEach((width,i)=>sheet.getRange(`${column(i)}1:${column(i)}${total}`).format.columnWidthPx=width);
+  widths.forEach((width,i)=>sheet.getRange(`${column(i)}1:${column(i)}${total}`).format.columnWidthPx=!includeTranslations&&i===2?95:width);
   const table=sheet.tables.add(`A7:AE${end}`,true,`${cfg.prefix}Monitoring`);table.style='TableStyleMedium2';table.showFilterButton=true;
   sheet.getRange('A7:AE7').format={fill:'#243449',font:{name:'Arial',size:10,bold:true,color:'#FFFFFF'},horizontalAlignment:'center',verticalAlignment:'center',wrapText:true,rowHeight:42};
   sheet.freezePanes.freezeRows(7);sheet.freezePanes.freezeColumns(3);

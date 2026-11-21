@@ -108,11 +108,16 @@ class Store:
         row = self.connection.execute("SELECT value,captured_at,snapshot_id FROM baselines WHERE account=? AND drama_id=? AND metric=?", (account, drama_id, metric)).fetchone()
         return dict(row) if row else None
 
-    def metadata_at(self, account, drama_id, captured_at):
+    def metadata_at(self, account, drama_id, captured_at, *, include_translations=True):
         rows = self.connection.execute("SELECT payload FROM metadata WHERE account=? AND drama_id=? AND captured_at<=? ORDER BY captured_at", (account, drama_id, iso_time_from_string(captured_at))).fetchall()
         merged = {}
         for row in rows:
             update = json.loads(row[0])
+            if not include_translations:
+                merged.update({key: value for key, value in update.items() if key not in {
+                    "title_zh", "description_zh", "genre", "historical_description_zh",
+                    "translation_source_hash", "translation_provider", "translation_created_at"}})
+                continue
             if "source_title" in update and "source_title" in merged and update["source_title"] != merged["source_title"]:
                 merged.pop("title_zh", None)
             # Retain inherited translations only when the saved source proves equality.

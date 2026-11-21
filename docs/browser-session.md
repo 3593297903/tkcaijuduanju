@@ -27,8 +27,31 @@ await refreshRequestSpec({
 
 新系统的checkpoint命令源可接入能生成相同结构的外部程序；若配置外部命令，核心还会核验文件被本轮重写、采集开始时间晚于调用、统计日正确，防止旧文件被冒充为今天。
 
+## 全量采集与封面备用任务
+
+如果已启用浏览器备用，CLI 在明确的网络故障时返回 `NEEDS_BROWSER`，并生成以 `.browser.local.json` 结尾的私有任务。`purpose: full_collection` 需要捕获整批分页，`purpose: covers` 使用已提交的快照补图。首屏请求接入仍由 `captureOnboarding` 处理。全量任务打开自己的临时页，在同一页验证首屏并翻到终页。
+
+Codex 连接用户 Chrome 并读过 CDP 文档后，可以处理 CLI 实际返回的备用任务。在浏览器工具的 JavaScript 运行时执行：
+
+```js
+const {captureCheckpoint} = await import('file:///E:/jianc/tkcaijuduanju/integrations/chrome_checkpoint.mjs');
+const result = await captureCheckpoint({
+  manifestPath: 'CLI 实际返回的 .browser.local.json 完整路径',
+  createTab: url => cua.createBrowserTab('chrome', url, {sessionName: '📊 短剧采集恢复'}),
+});
+nodeRepl.write(result);
+```
+
+然后用原来的命令继续。完成首屏任务时保存的选项会沿用。收到 `COVERS_INCOMPLETE` 时也可先恢复一次，把已经核验的封面写入缓存，再按剩余任务继续。
+
+```powershell
+.\run_onboard.cmd --resume 'CLI 返回的 .browser.local.json 完整路径'
+```
+
+工具返回 `CAPTURE_ALREADY_RUNNING` 时，先等原捕获结束。若捕获进程意外终止且锁仍存在，确认原运行已经停止，再重新发起采集或根据私有任务记录恢复。浏览器断开时任务可以保留，直到 Codex 重新识别这台 Chrome。
+
 ## 请求配置
 
 HTTP源从`request-specs/*.local.json`读取私有请求。禁止将真实Cookie、签名URL或HAR提交仓库。程序只使用正常请求与有限重试，不提供绕过验证码、生成平台签名或规避权限的功能。
 
-新剧的封面下载、中文翻译和整剧发布时间需分别处理。默认交付缺中文时返回退出码5，按[中文资料交付说明](translations.md)由Codex忠实补译保存的原文，再继续导出，不重采数字；只有明确的原文交付使用`--allow-untranslated`。原始简介未获得时显示缺失，绝不能由剧名编剧情或由ID推算发布时间。
+正式采集默认交付原始剧名和简介，封面按现有流程下载和核验。需要中文时，另按[中文资料交付说明](translations.md)显式启用补译，复用已提交的数字快照。原始简介或发布时间缺失时如实标记。

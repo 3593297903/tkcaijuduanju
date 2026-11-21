@@ -1,4 +1,4 @@
-"""Chinese delivery defaults, source-bound reuse, and observation preservation."""
+"""Original-text delivery, explicit translation, and source-bound reuse."""
 
 import contextlib
 import copy
@@ -43,19 +43,62 @@ class TranslationTests(LocalCase):
         return ([tuple(r) for r in self.store.connection.execute("SELECT id,fingerprint FROM snapshots ORDER BY id")],
                 [tuple(r) for r in self.store.connection.execute("SELECT * FROM baselines ORDER BY account,drama_id,metric")])
 
-    def test_report_requires_chinese_by_default_and_raw_is_explicit(self):
-        self.seed()
+    def saved_report(self):
+        path = self.config.report_dir / "2020-01-01/frontend/merged.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def assert_original_report(self, report):
+        self.assertIs(report["include_translations"], False)
+        row = report["rows"][0]
+        self.assertEqual((row["title"], row["description_en"]), ("A Little Hero", "A girl saves her father."))
+        self.assertEqual(row["today_views"], 1234567)
+        self.assertFalse(row.get("title_zh"))
+        self.assertFalse(row.get("description_zh"))
+        self.assertNotIn("待翻译", json.dumps(report, ensure_ascii=False))
+        self.assertFalse((self.config.state_dir / "translation_tasks").exists())
+
+    def test_report_default_and_compatibility_flag_deliver_original_text_without_translation(self):
+        self.seed(translated=True)
         args = ("report", "--day", "2020-01-01", "--metric", "frontend", "--no-covers")
-        self.assertEqual(self.invoke(*args), 5, self.stderr)
+        with (
+            patch("tkmonitor.translations.require_chinese", side_effect=AssertionError("Unexpected translation check")),
+            patch("tkmonitor.translations.translation_tasks", side_effect=AssertionError("Unexpected translation task")),
+        ):
+            for flags in ((), ("--allow-untranslated",)):
+                with self.subTest(flags=flags):
+                    self.assertEqual(self.invoke(*args, *flags), 0, self.stderr)
+                    self.assert_original_report(self.saved_report())
+
+    def test_report_requires_chinese_only_when_explicitly_requested(self):
+        self.seed()
+        self.assertEqual(self.invoke("report", "--day", "2020-01-01", "--metric", "frontend",
+                                     "--no-covers", "--translate"), 5, self.stderr)
         self.assertEqual(json.loads(self.stdout)["pending"], 1)
         self.assertFalse((self.config.report_dir / "2020-01-01/frontend/merged.json").exists())
-        self.assertEqual(self.invoke(*args, "--allow-untranslated"), 0, self.stderr)
+
+    def test_default_collection_reports_originals_and_finalization_still_completes_covers(self):
+        snapshot = self.seed()
+        covers = [{"account": "demo", "id": ONE, "status": "existing"}]
+        with (
+            patch("tkmonitor.cli.collect_external", return_value=snapshot) as collect,
+            patch("tkmonitor.translations.require_chinese", side_effect=AssertionError("Unexpected translation check")),
+            patch("tkmonitor.translations.translation_tasks", side_effect=AssertionError("Unexpected translation task")),
+            patch("tkmonitor.media.complete_covers", return_value=covers) as complete_covers,
+        ):
+            self.assertEqual(self.invoke("collect", "--day", "2020-01-01", "--report"), 0, self.stderr)
+            self.assert_original_report(self.saved_report())
+            self.assertEqual(self.invoke("finalize", "--day", "2020-01-01", "--no-download"), 0, self.stderr)
+            report = self.saved_report()
+            self.assert_original_report(report)
+            self.assertEqual(report["media_coverage"]["covers"], 1)
+            collect.assert_called_once()
+            complete_covers.assert_called_once()
 
     def test_collection_is_saved_before_translation_pause(self):
         snapshot = self.seed()
         # A fresh collection can commit successfully while its delivery needs translation.
         with patch("tkmonitor.cli.collect_external", return_value=snapshot):
-            self.assertEqual(self.invoke("collect", "--day", "2020-01-01", "--report"), 5, self.stderr)
+            self.assertEqual(self.invoke("collect", "--day", "2020-01-01", "--report", "--translate"), 5, self.stderr)
         self.assertEqual(len(self.store.snapshots()), 1)
         self.assertEqual(self.store.connection.execute("SELECT status FROM attempts").fetchone()[0], "valid")
 
@@ -67,7 +110,11 @@ class TranslationTests(LocalCase):
         self.assertEqual(self.invoke("import-translations", "--input", str(path)), 0, self.stderr)
         self.assertEqual(before, self.immutable())
         with patch("tkmonitor.cli.collect_external", side_effect=AssertionError("No recollection")):
-            self.assertEqual(self.invoke("report", "--day", "2020-01-01", "--metric", "frontend", "--no-covers"), 0, self.stderr)
+            self.assertEqual(self.invoke("report", "--day", "2020-01-01", "--metric", "frontend",
+                                         "--no-covers", "--translate"), 0, self.stderr)
+        saved = self.saved_report()
+        self.assertIs(saved.get("include_translations", True), True)
+        self.assertEqual(saved["rows"][0]["description_zh"], "一个女孩救下了自己的父亲。")
         current = build_report(self.store, self.config, "2020-01-01", "frontend")["rows"][0]
         self.assertEqual(current["title_zh"], "小小英雄")
         self.assertEqual(current["description_zh"], "一个女孩救下了自己的父亲。")
