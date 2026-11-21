@@ -1,4 +1,4 @@
-"""HTTP and browser/checkpoint adapters with one complete-snapshot contract.
+"""HTTP observations and complete HTTP/browser snapshots.
 
 Transport injection keeps pagination, retries and authentication tests fully offline.
 No request URL, query string, headers or exception text is emitted to public logs.
@@ -14,12 +14,12 @@ import socket
 import subprocess
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, unquote_plus, urlsplit, urlunsplit, urljoin
+from urllib.parse import SplitResult, parse_qsl, quote, unquote_plus, urlsplit, urlunsplit, urljoin
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from .config import read_json
-from .model import (ID_PATTERN, MonitorError, SourceError, Record, Snapshot, iso_time, now_utc, parse_display,
-                    parse_time, validate_snapshot)
+from .model import (HANDLE_PATTERN, ID_PATTERN, MonitorError, SourceError, Record, Snapshot, iso_time, local_day,
+                    now_utc, parse_display, parse_time, validate_record, validate_snapshot)
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,45 @@ class HttpResponse:
     headers: dict
     body: bytes
     url: str
+
+
+@dataclass(frozen=True)
+class _HttpRequest:
+    parts: SplitResult
+    host: str
+    headers: dict
+    maximum: int
+    retries: int
+    timeout: float
+    backoff: float
+    cursor_param: str
+    initial_cursor: str
+    drama_list: bool
+    page_size: int | None
+    fields: dict | None
+    record_fields: dict | None
+
+
+@dataclass(frozen=True)
+class Observation:
+    account: str
+    day: str
+    started_at: str
+    records: tuple[Record, ...]
+    pages: tuple[dict, ...]
+    terminal_seen: bool
+    stopped: dict | None
+    unresolved_reference_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ObservedPage:
+    cursor: str
+    has_more: bool
+    missing_slots: int
+    identities: tuple[str, ...]
+    records: tuple[Record, ...]
+    references: frozenset[str]
 
 
 def validate_url(url):
@@ -74,6 +113,14 @@ def urllib_transport(url, headers, timeout):
         if len(body) > 25 * 1024 * 1024:
             raise MonitorError("HTTP response exceeds the safe size limit; inspect the request specification.")
         return HttpResponse(response.status, dict(response.headers), body, response.geturl())
+
+
+def http_transport(network):
+    if network is not None:
+        def transport(url, headers, timeout):
+            return network.get(url, headers, timeout, validate_host=validate_url, max_bytes=25 * 1024 * 1024)
+        return transport
+    return urllib_transport
 
 
 def _field(value, dotted):
@@ -227,12 +274,7 @@ def _cursor_url(parts, parameter, cursor):
     return urlunsplit(parts._replace(query="&".join(segments)))
 
 
-def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sleep, clock=now_utc):
-    """Read a private GET specification and collect all pages, or raise MonitorError.
-
-    transport(url, headers, timeout) -> HttpResponse. URLs and headers are private.
-    Fields defaults match TikTok's dramaList/hasMore/cursor/status_code response.
-    """
+def _load_http_request(spec_path):
     spec = read_json(spec_path)
     if not isinstance(spec, dict):
         raise MonitorError("HTTP request specification must be a JSON object.")
@@ -265,25 +307,54 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
     initial_offset = _numeric_cursor(cursor)
     if drama_list and initial_offset != 0:
         raise MonitorError("TikTok drama_list collection must start at numeric cursor zero to cover the whole account.")
+    counts = [value for key, value in query if key == "count"]
+    page_size = int(counts[0]) if len(counts) == 1 and re.fullmatch(r"[0-9]{1,5}", counts[0]) else None
+    return _HttpRequest(parts, host, headers, maximum, retries, timeout, backoff, cursor_param, cursor,
+                        drama_list, page_size or None, spec.get("fields"), spec.get("record_fields"))
+
+
+def _response_json(response, account=None):
+    content_type = next((value for key, value in response.headers.items() if key.lower() == "content-type"), "")
+    if "application/json" not in content_type.lower() and "+json" not in content_type.lower():
+        raise SourceError("TikTok returned non-JSON content, possibly a login or verification page; inspect the saved response.", "NON_JSON", account)
+    try:
+        return json.loads(response.body)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise SourceError("TikTok response is not valid JSON; check login or verification in the browser.", "INVALID_JSON", account) from exc
+
+
+def _drama_reference(item):
+    if not isinstance(item, dict) or item.keys() != {"dramaID"}:
+        return None
+    reference = item["dramaID"]
+    if not isinstance(reference, str) or not ID_PATTERN.fullmatch(reference):
+        raise MonitorError("ID-only drama references must contain valid 19-digit strings.")
+    return reference
+
+
+def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sleep, clock=now_utc):
+    """Read a private GET specification and collect all pages, or raise MonitorError."""
+    request = _load_http_request(spec_path)
+    cursor = request.initial_cursor
     records, identifiers, seen, references = [], set(), {cursor}, set()
     started = clock()
     transport = transport or urllib_transport
-    for page_number in range(1, maximum + 1):
-        request_url = _cursor_url(parts, cursor_param, cursor)
-        for attempt in range(retries + 1):
+    for page_number in range(1, request.maximum + 1):
+        request_url = _cursor_url(request.parts, request.cursor_param, cursor)
+        for attempt in range(request.retries + 1):
             try:
-                response = transport(request_url, headers, timeout)
+                response = transport(request_url, request.headers, request.timeout)
             except SourceError as exc:
-                if exc.code not in {"PROXY_UNAVAILABLE", "NETWORK_ERROR"} or attempt == retries:
+                if exc.code not in {"PROXY_UNAVAILABLE", "NETWORK_ERROR"} or attempt == request.retries:
                     raise
-                sleep(min(backoff, 2 ** attempt))
+                sleep(min(request.backoff, 2 ** attempt))
                 continue
             except (TimeoutError, socket.timeout, URLError, ConnectionError, OSError) as exc:
-                if attempt == retries:
+                if attempt == request.retries:
                     raise SourceError("HTTP request timed out or failed after bounded retries; check network access and retry collection.", "NETWORK_ERROR", account) from exc
-                sleep(min(backoff, 2 ** attempt))
+                sleep(min(request.backoff, 2 ** attempt))
                 continue
-            if validate_url(response.url) != host:
+            if validate_url(response.url) != request.host:
                 raise MonitorError("HTTP response changed hostname; no snapshot was committed.")
             if raw_dir:
                 target = Path(raw_dir) / f"page-{page_number:04d}-attempt-{attempt}.body"
@@ -292,38 +363,29 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
             if response.status in (401, 403):
                 raise SourceError("TikTok authentication failed (401/403); refresh the authorized browser session and private request specification.", "AUTH_REQUIRED", account)
             if response.status == 429 or 500 <= response.status <= 599:
-                if attempt == retries:
+                if attempt == request.retries:
                     raise SourceError("TikTok rate limit or server failure persisted after bounded retries; try again later.", "RATE_LIMIT" if response.status == 429 else "SERVER_ERROR", account)
-                sleep(_retry_delay(response.headers, attempt, backoff))
+                sleep(_retry_delay(response.headers, attempt, request.backoff))
                 continue
             if not 200 <= response.status <= 299:
                 raise SourceError("TikTok returned an unsuccessful HTTP status; inspect the private request specification.", "HTTP_ERROR", account)
             break
-        content_type = next((value for key, value in response.headers.items() if key.lower() == "content-type"), "")
-        if "application/json" not in content_type.lower() and "+json" not in content_type.lower():
-            raise SourceError("TikTok returned non-JSON content, possibly a login or verification page; inspect the saved response.", "NON_JSON", account)
-        try:
-            value = json.loads(response.body)
-        except (json.JSONDecodeError, UnicodeError) as exc:
-            raise SourceError("TikTok response is not valid JSON; check login or verification in the browser.", "INVALID_JSON", account) from exc
         # This endpoint may send a separate empty terminal page after a full page.
         # The offset check below requires that such a page consumes no slots.
         items, has_more, following = _page(
-            value, spec.get("fields"), allow_empty_drama_list=drama_list and page_number > 1)
-        if drama_list:
+            _response_json(response, account), request.fields, allow_empty_drama_list=request.drama_list and page_number > 1)
+        if request.drama_list:
             _drama_offset(cursor, following, len(items))
         for item in items:
             # drama_list can include an ID-only reference alongside its complete
             # item. It occupies a raw pagination slot, but contains no play count.
             # Resolve it within this full run; never turn it into a blank record
             # or silently drop an ID whose complete data was not returned.
-            if drama_list and isinstance(item, dict) and set(item) == {"dramaID"}:
-                reference = item["dramaID"]
-                if not isinstance(reference, str) or not ID_PATTERN.fullmatch(reference):
-                    raise MonitorError("ID-only drama references must contain valid 19-digit strings.")
+            reference = _drama_reference(item) if request.drama_list else None
+            if reference is not None:
                 references.add(reference)
                 continue
-            record = _api_record(item, spec.get("record_fields"))
+            record = _api_record(item, request.record_fields)
             if record.id in identifiers:
                 raise MonitorError("Duplicate drama ID across pages; no partial snapshot was committed.")
             identifiers.add(record.id)
@@ -340,6 +402,133 @@ def collect_http(account, spec_path, transport=None, raw_dir=None, sleep=time.sl
         seen.add(following)
         cursor = following
     raise MonitorError("Maximum pagination pages reached before hasMore=false; increase the local bound only after checking the response.")
+
+
+def _parse_observed_page(value, request, cursor, page_number, identifiers):
+    items, more, following = _page(value, request.fields, allow_empty_drama_list=page_number > 1)
+    current_offset, next_offset = _numeric_cursor(cursor), _numeric_cursor(following)
+    span = next_offset - current_offset if next_offset is not None else -1
+    if (span < len(items) or (more and not span)
+            or (request.page_size is not None and span > request.page_size)):
+        raise SourceError("TikTok returned an unusable pagination offset.", "PAGINATION_INVALID")
+    records, references, identities = {}, set(), []
+    for item in items:
+        reference = _drama_reference(item)
+        if reference is not None:
+            references.add(reference)
+            identities.append(reference)
+            continue
+        record = _api_record(item, request.record_fields)
+        validate_record(record)
+        if record.id in identifiers or record.id in records:
+            raise SourceError("TikTok returned a duplicate drama ID.", "DUPLICATE_DRAMA_ID")
+        records[record.id] = record
+        identities.append(record.id)
+    return _ObservedPage(following, more, span - len(items), tuple(identities), tuple(records.values()), frozenset(references))
+
+
+def _retryable_business_error(value):
+    # The observed error has no usable drama page and reports 100004 at HTTP 2xx.
+    if not isinstance(value, dict):
+        return False
+    statuses = [str(value[key]) for key in ("status_code", "statusCode") if key in value]
+    return ("100004" in statuses and all(status in {"0", "100004"} for status in statuses)
+            and (not isinstance(value.get("dramaList"), list) or value.get("cursor") is None))
+
+
+def _compatible_pages(left, right):
+    if int(left.cursor) != int(right.cursor) or left.has_more != right.has_more:
+        return False
+    # A retry can fill holes, but it must preserve the identities and order already observed.
+    shorter, longer = sorted((left.identities, right.identities), key=len)
+    remaining = iter(longer)
+    return all(any(candidate == identity for candidate in remaining) for identity in shorter)
+
+
+def _read_observed_page(request, cursor, page_number, identifiers, transport, sleep):
+    url = _cursor_url(request.parts, request.cursor_param, cursor)
+    best = None
+    attempts = []
+    code = None
+    for index in range(3):
+        event = {"attempt": index + 1}
+        attempts.append(event)
+        response = None
+        try:
+            response = transport(url, request.headers, request.timeout)
+            event["http_status"] = response.status
+            if validate_url(response.url) != request.host:
+                raise SourceError("HTTP response changed hostname.", "HOST_CHANGED")
+            if not 200 <= response.status <= 299:
+                if response.status in (401, 403):
+                    raise SourceError("TikTok requires authentication.", "AUTH_REQUIRED")
+                if response.status == 429:
+                    raise SourceError("TikTok rate limited the observation.", "RATE_LIMIT")
+                failure = "SERVER_ERROR" if 500 <= response.status <= 599 else "HTTP_ERROR"
+                raise SourceError("TikTok returned an unsuccessful HTTP status.", failure)
+            value = _response_json(response)
+            if _retryable_business_error(value):
+                code = "API_ERROR"
+                event.update(outcome="api_error", status_code=100004)
+            else:
+                page = _parse_observed_page(value, request, cursor, page_number, identifiers)
+                event.update(outcome="gap" if page.missing_slots else "ok", response_cursor=int(page.cursor),
+                             returned_rows=len(page.identities), missing_slots=page.missing_slots)
+                if best is not None and not _compatible_pages(best, page):
+                    raise SourceError("Same-cursor responses disagree on the offset or drama identities.", "PAGE_CONFLICT")
+                if not page.missing_slots:
+                    return page, attempts, None
+                if best is None or len(page.identities) >= len(best.identities):
+                    best = page
+        except MonitorError as exc:
+            code = getattr(exc, "code", None) or "INVALID_RESPONSE"
+            event.update(outcome="error", code=code)
+            if code not in {"PROXY_UNAVAILABLE", "NETWORK_ERROR", "SERVER_ERROR"}:
+                return None, attempts, code
+        except (URLError, OSError):
+            code = "NETWORK_ERROR"
+            event.update(outcome="error", code=code)
+        if index < 2:
+            headers = response.headers if response is not None else {}
+            sleep(_retry_delay(headers, index, request.backoff))
+    return best, attempts, None if best is not None else code
+
+
+def observe_http(account, spec_path, transport=None, *, sleep=None, clock=now_utc):
+    """Report one account's accepted pages, including gaps, without creating a snapshot."""
+    if not isinstance(account, str) or not HANDLE_PATTERN.fullmatch(account):
+        raise MonitorError("Observation account handle is invalid.")
+    request = _load_http_request(spec_path)
+    if not request.drama_list:
+        raise MonitorError("Observation requires a TikTok drama_list request specification.")
+    transport = transport or urllib_transport
+    sleep = sleep if sleep is not None else time.sleep
+    started_at = iso_time(clock())
+    day = local_day(started_at)
+    cursor = request.initial_cursor
+    records, references, pages = {}, set(), []
+    terminal_seen = False
+    stopped = None
+    for page_number in range(1, request.maximum + 1):
+        page, attempts, code = _read_observed_page(request, cursor, page_number, records, transport, sleep)
+        if local_day(iso_time(clock())) != day:
+            code = "DATE_CHANGED"
+        if code is not None:
+            stopped = {"page": page_number, "request_cursor": int(cursor), "attempts": attempts, "code": code}
+            break
+        pages.append({"page": page_number, "request_cursor": int(cursor), "response_cursor": int(page.cursor),
+                      "returned_rows": len(page.identities), "missing_slots": page.missing_slots, "has_more": page.has_more,
+                      "attempts": attempts})
+        records.update((record.id, record) for record in page.records)
+        references.update(page.references)
+        if not page.has_more:
+            terminal_seen = True
+            break
+        cursor = page.cursor
+    else:
+        stopped = {"page": request.maximum + 1, "request_cursor": int(cursor), "attempts": [], "code": "PAGE_LIMIT"}
+    return Observation(account, day, started_at, tuple(records.values()), tuple(pages), terminal_seen,
+                       stopped, tuple(sorted(references - records.keys())))
 
 
 def collect_checkpoint(path, account, expected_day, not_before=None):
@@ -402,11 +591,7 @@ def collect_external(config, account, expected_day, raw_dir, *, network=None):
     if kind == "http":
         if not source.get("request_spec"):
             raise MonitorError("HTTP source needs a private request_spec file; capture an authorized request first.")
-        transport = None
-        if network is not None:
-            def transport(url, headers, timeout):
-                return network.get(url, headers, timeout, validate_host=validate_url, max_bytes=25 * 1024 * 1024)
-        snapshot = collect_http(handle, config.resolve(source["request_spec"]), transport=transport, raw_dir=raw_dir)
+        snapshot = collect_http(handle, config.resolve(source["request_spec"]), transport=http_transport(network), raw_dir=raw_dir)
         return validate_snapshot(snapshot, {handle}, expected_day)
     if kind not in ("checkpoint", "browser"):
         raise MonitorError("Source type must be http, checkpoint or browser.")

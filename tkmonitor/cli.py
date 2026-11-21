@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import shutil
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from functools import partial
 import uuid
 
@@ -21,7 +21,7 @@ from .migration import import_history
 from .model import MonitorError, SourceError, local_day, today
 from .network import load_network_config
 from .reports import export_report
-from .sources import collect_external
+from .sources import collect_external, http_transport, observe_http
 from .store import Store
 
 
@@ -50,6 +50,8 @@ def parser():
     report.add_argument("--output", default=None)
     report.add_argument("--no-covers", action="store_true")
     commands.add_parser("status", help="Show valid history, today's coverage and collection attempts")
+    observe = commands.add_parser("observe", help="Read one account and show observed records and pagination gaps as JSON")
+    observe.add_argument("--account", required=True, help="One configured HTTP account handle")
     collect = commands.add_parser("collect", help="Collect complete fresh snapshots and commit the whole selected batch")
     collect.add_argument("--day", default=None, help="Expected Beijing day; defaults to today, never inferred from an old file")
     collect.add_argument("--account", action="append", help="Restrict to configured account(s)")
@@ -250,8 +252,72 @@ def _offer_browser_fallback(base, config, args, exc, *, origin_manifest=None):
     return 4
 
 
+def _observation_history(database, observation):
+    if not database.is_file():
+        return None, None
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        baseline = connection.execute(
+            "SELECT day, payload FROM snapshots WHERE account=? AND captured_at<? "
+            "ORDER BY captured_at DESC, id DESC LIMIT 1",
+            (observation.account, observation.started_at),
+        ).fetchone()
+    if baseline is None:
+        return None, None
+    day, payload = baseline
+    if not observation.terminal_seen:
+        return day, None
+    observed_ids = {record.id for record in observation.records} | set(observation.unresolved_reference_ids)
+    missing = [{"id": row["id"], "title": row["title"], "last_seen": day}
+               for row in json.loads(payload)["records"] if row["id"] not in observed_ids]
+    return day, missing
+
+
+def _observe_account(config, handle):
+    account = next((item for item in config.accounts if item["handle"] == handle), None)
+    if account is None:
+        raise MonitorError("Requested observation account is not configured.")
+    source = account.get("source", {})
+    if not isinstance(source, dict) or source.get("type", "http") != "http" or not source.get("request_spec"):
+        raise MonitorError("Observation needs a configured HTTP request specification for this account.")
+    network = load_network_config(config.path.parent)
+    observation = observe_http(handle, config.resolve(source["request_spec"]), transport=http_transport(network))
+    baseline_day, missing = _observation_history(config.state_dir / "monitor.sqlite3", observation)
+    gaps = [page for page in observation.pages if page["missing_slots"]]
+    plays = [record.frontend_integer for record in observation.records if record.frontend_integer is not None]
+    if not observation.terminal_seen:
+        status = "STOPPED_BEFORE_END"
+    elif gaps or observation.unresolved_reference_ids:
+        status = "OBSERVED_WITH_GAPS"
+    else:
+        status = "OBSERVED_TO_END"
+    _print({
+        "status": status,
+        "account": observation.account,
+        "day": observation.day,
+        "terminal_seen": observation.terminal_seen,
+        "records": len(observation.records),
+        "total_plays": sum(plays) if plays else None,
+        "known_play_counts": len(plays),
+        "pages": len(observation.pages),
+        "page_results": observation.pages,
+        "gaps": gaps,
+        "unconfirmed_slots": sum(page["missing_slots"] for page in gaps),
+        "stopped": observation.stopped,
+        "historical_baseline_day": baseline_day,
+        "historical_not_returned": missing,
+        "unresolved_reference_ids": observation.unresolved_reference_ids,
+        "observed_records": [{"id": record.id, "title": record.title, "frontend_integer": record.frontend_integer}
+                             for record in observation.records],
+    })
+    if observation.terminal_seen:
+        return 0
+    return 3 if observation.records else 2
+
+
 def run(args):
     config = load_config(args.config)
+    if args.command == "observe":
+        return _observe_account(config, args.account)
     if args.command in {"onboard", "collect"} and not 5 <= args.browser_timeout <= 300:
         raise MonitorError("Browser preparation budget must be between 5 and 300 seconds.")
     if args.command == "onboard":

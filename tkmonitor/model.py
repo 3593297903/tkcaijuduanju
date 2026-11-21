@@ -138,6 +138,21 @@ class Snapshot:
         return self.original_fingerprint or fingerprint(self.as_dict())
 
 
+def validate_record(record):
+    if not isinstance(record.id, str) or not ID_PATTERN.fullmatch(record.id):
+        raise MonitorError("Drama IDs must be 19-digit strings.")
+    if not isinstance(record.title, str) or not record.title.strip():
+        raise MonitorError("A drama title is missing.")
+    integer(record.display_views, "display-equivalent count")
+    integer(record.frontend_integer, "frontend integer")
+    if record.display_views is None and record.frontend_integer is None:
+        raise MonitorError("A drama has neither a visible play count nor a frontend integer.")
+    if record.views_raw is not None and record.display_views != parse_display(record.views_raw):
+        raise MonitorError("Visible play count disagrees with its saved abbreviation.")
+    if not isinstance(record.metadata, dict):
+        raise MonitorError("Drama metadata must be an object.")
+
+
 def validate_snapshot(snapshot, allowed_accounts=None, expected_day=None, not_before=None):
     if not isinstance(snapshot.account, str) or not HANDLE_PATTERN.fullmatch(snapshot.account):
         raise MonitorError("Snapshot account handle is invalid.")
@@ -164,19 +179,8 @@ def validate_snapshot(snapshot, allowed_accounts=None, expected_day=None, not_be
         raise MonitorError("Collection returned no dramas; check authentication and the Short dramas response.")
     seen = set()
     for record in snapshot.records:
-        if not isinstance(record.id, str) or not ID_PATTERN.fullmatch(record.id):
-            raise MonitorError("Drama IDs must be 19-digit strings.")
+        validate_record(record)
         if record.id in seen:
             raise MonitorError("Duplicate drama ID in a snapshot; pagination cannot be committed.")
         seen.add(record.id)
-        if not isinstance(record.title, str) or not record.title.strip():
-            raise MonitorError("A drama title is missing.")
-        integer(record.display_views, "display-equivalent count")
-        integer(record.frontend_integer, "frontend integer")
-        if record.display_views is None and record.frontend_integer is None:
-            raise MonitorError("A drama has neither a visible play count nor a frontend integer.")
-        if record.views_raw is not None and record.display_views != parse_display(record.views_raw):
-            raise MonitorError("Visible play count disagrees with its saved abbreviation.")
-        if not isinstance(record.metadata, dict):
-            raise MonitorError("Drama metadata must be an object.")
     return snapshot

@@ -1,12 +1,14 @@
 import contextlib
 import csv
 from datetime import timedelta
+from functools import partial
 import io
 import json
 from pathlib import Path
 import shutil
 import sys
 import unittest
+from urllib.parse import parse_qs, urlsplit
 import uuid
 from unittest.mock import patch
 
@@ -16,7 +18,7 @@ from tkmonitor.config import load_config
 from tkmonitor.migration import import_history
 from tkmonitor.model import MonitorError, Record, Snapshot, iso_time, local_day, now_utc, parse_display
 from tkmonitor.reports import export_report
-from tkmonitor.sources import HttpResponse, collect_checkpoint, collect_external, collect_http, validate_url
+from tkmonitor.sources import HttpResponse, collect_checkpoint, collect_external, collect_http, observe_http, validate_url
 from tkmonitor.store import Store
 
 ONE, TWO = "0000000000000000001", "0000000000000000002"
@@ -586,6 +588,174 @@ class HttpTests(LocalCase):
                 snapshot = collect_http("demo", self.spec_path, self.transport([self.response(items=[item])]))
                 self.assertEqual(snapshot.records[0].metadata["thumbnail_url"], expected)
                 self.assertEqual(snapshot.records[0].metadata["platform_themes"], ["Family"])
+
+
+class ObserveTests(LocalCase):
+    def setUp(self):
+        super().setUp()
+        self.spec_path = self.root / "request.local.json"
+        self.url = ("https://www.tiktok.com/api/drama/user/drama_list/"
+                    "?count=20&cursor=0&opaque=a%20b+%2f%2F")
+        self.headers = {"Referer": "https://www.tiktok.com/@demo"}
+        write_json(self.spec_path, {"url": self.url, "headers": self.headers, "retries": 0})
+        write_json(self.config_path, {"state_dir": "state", "report_dir": "reports", "accounts": [
+            {"handle": "demo", "source": {"type": "http", "request_spec": self.spec_path.name}}
+        ]})
+        self.calls = []
+
+    @staticmethod
+    def items(*identifiers):
+        return [{"dramaID": f"{ident:019d}", "dramaName": f"Synthetic {ident}", "numWatched": ident}
+                for ident in identifiers]
+
+    def response(self, value, status=200):
+        return HttpResponse(status, {"Content-Type": "application/json"}, json.dumps(value).encode(), self.url)
+
+    def page(self, following, identifiers, *, more=True):
+        return self.response({"status_code": 0, "statusCode": 0, "cursor": str(following),
+                              "hasMore": more, "dramaList": self.items(*identifiers)})
+
+    def business_error(self):
+        return self.response({"status_code": 0, "statusCode": 100004, "status_msg": ""})
+
+    def transport(self, responses):
+        sequence = iter(responses)
+
+        def send(url, headers, timeout):
+            self.calls.append((url, headers, timeout))
+            return next(sequence)
+
+        return send
+
+    def cursors(self):
+        return [int(parse_qs(urlsplit(url).query)["cursor"][0]) for url, _, _ in self.calls]
+
+    def observe(self, *responses):
+        return observe_http("demo", self.spec_path, self.transport(responses), sleep=lambda seconds: None)
+
+    def test_stable_sparse_page_after_two_retries_continues_to_terminal(self):
+        second = self.page(40, [ident for ident in range(21, 41) if ident != 26])
+        result = self.observe(
+            self.page(20, range(1, 21)), second, second, second, self.page(60, range(41, 61)),
+            self.page(80, range(61, 81)), self.page(81, [81], more=False),
+        )
+        self.assertEqual(self.cursors(), [0, 20, 20, 20, 40, 60, 80])
+        self.assertEqual(self.calls[1:4], [self.calls[1]] * 3)
+        self.assertEqual(self.calls[1][0], self.url.replace("cursor=0", "cursor=20"))
+        self.assertTrue(result.terminal_seen)
+        self.assertIsNone(result.stopped)
+        self.assertEqual(len(result.pages), 5)
+        self.assertEqual([int(record.id) for record in result.records],
+                         [ident for ident in range(1, 82) if ident != 26])
+        self.assertEqual(sum(record.frontend_integer for record in result.records), sum(range(1, 82)) - 26)
+        second_page = result.pages[1]
+        self.assertEqual({key: second_page[key] for key in (
+            "page", "request_cursor", "response_cursor", "returned_rows", "missing_slots"
+        )}, {"page": 2, "request_cursor": 20, "response_cursor": 40, "returned_rows": 19, "missing_slots": 1})
+        self.assertEqual(len(second_page["attempts"]), 3)
+
+    def test_recovered_sparse_page_uses_only_the_successful_attempt(self):
+        result = self.observe(self.page(2, [1]), self.page(2, [1, 2]), self.page(3, [3], more=False))
+        self.assertEqual(self.cursors(), [0, 0, 2])
+        self.assertTrue(result.terminal_seen)
+        self.assertEqual([int(record.id) for record in result.records], [1, 2, 3])
+        self.assertEqual(result.pages[0]["missing_slots"], 0)
+        self.assertEqual(len(result.pages[0]["attempts"]), 2)
+
+    def test_business_error_without_cursor_keeps_prior_records_after_two_retries(self):
+        error = self.business_error()
+        result = self.observe(self.page(1, [1]), error, error, error)
+        self.assertEqual(self.cursors(), [0, 1, 1, 1])
+        self.assertFalse(result.terminal_seen)
+        self.assertEqual([record.id for record in result.records], [ONE])
+        self.assertEqual(len(result.pages), 1)
+        self.assertEqual(result.stopped["page"], 2)
+        self.assertEqual(result.stopped["request_cursor"], 1)
+        self.assertEqual(len(result.stopped["attempts"]), 3)
+
+    def test_business_error_and_sparse_page_share_the_same_retry_budget(self):
+        short = self.page(3, [2])
+        result = self.observe(self.page(1, [1]), self.business_error(), short, short,
+                              self.page(4, [4], more=False))
+        self.assertEqual(self.cursors(), [0, 1, 1, 1, 3])
+        self.assertTrue(result.terminal_seen)
+        self.assertEqual(result.pages[1]["missing_slots"], 1)
+        self.assertEqual([int(record.id) for record in result.records], [1, 2, 4])
+
+    def test_failed_retries_retain_the_sparse_page_with_a_trusted_cursor(self):
+        short = self.page(3, [2])
+        result = self.observe(self.page(1, [1]), short, self.response({}, status=503),
+                              self.business_error(), self.page(4, [4], more=False))
+        self.assertEqual(self.cursors(), [0, 1, 1, 1, 3])
+        self.assertTrue(result.terminal_seen)
+        self.assertEqual(result.pages[1]["missing_slots"], 1)
+        self.assertEqual([int(record.id) for record in result.records], [1, 2, 4])
+
+    def test_conflicting_retry_cursor_preserves_prefix_and_does_not_guess_next(self):
+        result = self.observe(self.page(1, [1]), self.page(3, [2]), self.page(4, [2]))
+        self.assertEqual(self.cursors(), [0, 1, 1])
+        self.assertFalse(result.terminal_seen)
+        self.assertEqual([record.id for record in result.records], [ONE])
+        self.assertEqual(result.stopped["page"], 2)
+        self.assertEqual(result.stopped["request_cursor"], 1)
+
+    def cli(self, *responses):
+        transport = self.transport(responses)
+
+        class Network:
+            def get(self, url, headers, timeout, *, validate_host, max_bytes):
+                validate_host(url)
+                return transport(url, headers, timeout)
+
+        out, err = io.StringIO(), io.StringIO()
+        with (patch("tkmonitor.cli.load_network_config", return_value=Network()) as load,
+              patch("tkmonitor.cli.Store", side_effect=AssertionError("Observe opened a writable Store")),
+              patch("tkmonitor.cli.observe_http", partial(observe_http, sleep=lambda seconds: None)),
+              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err)):
+            code = main(["--config", str(self.config_path), "observe", "--account", "demo"])
+        load.assert_called_once_with(self.root.resolve())
+        self.assertEqual(err.getvalue(), "")
+        self.assertNotIn("opaque=", out.getvalue())
+        return code, json.loads(out.getvalue())
+
+    def test_cli_reports_gap_and_baseline_without_writing_database_or_reports(self):
+        self.store.commit_batch([
+            snap("2020-01-01T00:00:00Z", 4, 4, drama_id="0000000000000000004"),
+            snap("2020-01-02T16:00:00Z", 2, 2, drama_id=TWO),
+            snap("2020-01-03T00:00:00Z", 3, 3, drama_id="0000000000000000003", account="other"),
+        ])
+        database = self.config.state_dir / "monitor.sqlite3"
+        history_before = database.read_bytes()
+        files_before = set(self.root.rglob("*"))
+        short = self.page(2, [1])
+        code, result = self.cli(short, short, short, self.page(3, [3], more=False))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "OBSERVED_WITH_GAPS")
+        self.assertTrue(result["terminal_seen"])
+        self.assertEqual((result["records"], result["pages"], result["total_plays"]), (2, 2, 4))
+        self.assertEqual(result["gaps"][0]["missing_slots"], 1)
+        self.assertEqual(result["unconfirmed_slots"], 1)
+        self.assertEqual(result["historical_baseline_day"], "2020-01-03")
+        self.assertEqual(result["historical_not_returned"], [
+            {"id": TWO, "title": "Synthetic One", "last_seen": "2020-01-03"}
+        ])
+        self.assertEqual(database.read_bytes(), history_before)
+        self.assertEqual(set(self.root.rglob("*")), files_before)
+
+    def test_cli_partial_result_without_history_does_not_create_database(self):
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config["state_dir"] = "absent-state"
+        write_json(self.config_path, config)
+        error = self.business_error()
+        code, result = self.cli(self.page(1, [1]), error, error, error)
+        self.assertEqual(code, 3)
+        self.assertEqual(result["status"], "STOPPED_BEFORE_END")
+        self.assertFalse(result["terminal_seen"])
+        self.assertEqual(result["records"], 1)
+        self.assertEqual(result["stopped"]["request_cursor"], 1)
+        self.assertIsNone(result["historical_baseline_day"])
+        self.assertIsNone(result["historical_not_returned"])
+        self.assertFalse((self.root / "absent-state").exists())
 
 
 class CheckpointAndCliTests(LocalCase):

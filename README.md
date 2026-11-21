@@ -1,6 +1,6 @@
 # 短剧采集与监测
 
-当前版本为 `v0.2.1`。使用 `python -m tkmonitor --version` 查看本机版本。下文说明当前分支的用法。固定版本见 [GitHub Release](https://github.com/3593297903/tkcaijuduanju/releases/tag/v0.2.1) 和[版本记录](CHANGELOG.md)。
+当前版本为 `v0.2.2`。使用 `python -m tkmonitor --version` 查看本机版本。下文说明当前分支的用法。固定版本见 [GitHub Release](https://github.com/3593297903/tkcaijuduanju/releases/tag/v0.2.2) 和[版本记录](CHANGELOG.md)。
 
 `tkmonitor` 的采集、SQLite 历史、指标计算和 CSV／JSON／HTML 报表仅依赖 Python 标准库。完整日报的封面校验与转换另需可选的 Pillow，Excel 导出另需 Node 表格引擎。默认直接交付平台原始剧名和简介。需要中文版时显式加 `--translate`，由 Codex 或指定的翻译提供方按需补译。
 
@@ -69,6 +69,16 @@ python -X utf8 -m tkmonitor --config config.local.json collect --account epiccre
 ```
 
 同一批选择的账号全部验证通过后才事务提交。报表或 XLSX 在提交之后单独执行，导出失败不会回滚有效采集。缺少部分账号，或所选指标当日完全没有已知值时，报表会明确标注并返回退出码3；有效采集仍保留。`status` 中的 `recent_attempts` 区分 `running`、`failed`、`valid`。
+
+## 单账号观测
+
+用已保存的短剧列表请求检查一个账号的实采结果和分页缺位：
+
+```powershell
+python -X utf8 -m tkmonitor --config config.local.json observe --account epiccreation111
+```
+
+`observe` 通过标准输出返回 JSON，并只读查询历史。缺位页最多原页重试两次，有可用的下一游标就继续。摘要包含是否到达末页、实采数量、缺位页及历史有而本次未返回的剧目。到达末页返回 `0`，中途停止但有实采记录返回 `3`，中途停止且无可用记录返回 `2`。
 
 ## 新账号接入与请求恢复
 
